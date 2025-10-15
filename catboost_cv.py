@@ -44,13 +44,13 @@ class PhotoZCatBoostPipeline:
         start_time = time.time()
         
         # Load DR1 data
-        north_DR1 = Table(fitsio.FITS('../LEGACY+DR1/TABLE_DR1_north_v1_sep_1.fits')[1].read())
-        south_DR1 = Table(fitsio.FITS('../LEGACY+DR1/TABLE_DR1_south_v1_sep_1.fits')[1].read())
+        north_DR1 = Table(fitsio.FITS('/Storage/animesh/PECVEL/LEGACY+DR1/TABLE_DR1_north_v1_sep_1.fits')[1].read())
+        south_DR1 = Table(fitsio.FITS('/Storage/animesh/PECVEL/LEGACY+DR1/TABLE_DR1_south_v1_sep_1.fits')[1].read())
         DR1 = vstack([north_DR1, south_DR1])
 
         # Load Legacy data
-        north_legacy = Table(fitsio.FITS('../LEGACY+DR1/TABLE_legacy_north_v1_sep_1.fits')[1].read())
-        south_legacy = Table(fitsio.FITS('../LEGACY+DR1/TABLE_legacy_south_v1_sep_1.fits')[1].read())
+        north_legacy = Table(fitsio.FITS('/Storage/animesh/PECVEL/LEGACY+DR1/TABLE_legacy_north_v1_sep_1.fits')[1].read())
+        south_legacy = Table(fitsio.FITS('/Storage/animesh/PECVEL/LEGACY+DR1/TABLE_legacy_south_v1_sep_1.fits')[1].read())
         legacy = vstack([north_legacy, south_legacy])
         
         load_time = time.time() - start_time
@@ -133,6 +133,10 @@ class PhotoZCatBoostPipeline:
         
         self.feature_names = feature_names
         logger.info(f"Using features: {feature_names}")
+        missing_features = [f for f in feature_names if f not in legacy_filtered.colnames]
+        if missing_features:
+            raise ValueError(f"Missing features in data: {missing_features}")
+        
         
         X = legacy_filtered[feature_names].to_pandas().to_numpy()
         y = np.array(DR1_filtered['Z'])
@@ -166,7 +170,7 @@ class PhotoZCatBoostPipeline:
 
     def train_new_model(self, iterations=5000, depth=6, learning_rate=0.01):
         """Train a fresh model from scratch"""
-        logger.info("Training new CatBoost model...")
+        logger.info("Training new CatBoost model......")
         
         self.model = CatBoostRegressor(
             iterations=iterations,
@@ -180,9 +184,9 @@ class PhotoZCatBoostPipeline:
         )
         
         # Create pools
-        train_pool = Pool(self.X_train, self.y_train)
-        val_pool = Pool(self.X_val, self.y_val)
-        
+        train_pool = Pool(self.X_train, self.y_train,cat_features=[len(self.feature_names)-1] if 'TYPE' in self.feature_names else None)
+        val_pool = Pool(self.X_val, self.y_val,cat_features=[len(self.feature_names)-1] if 'TYPE' in self.feature_names else None)
+
         # Train the model
         self.model.fit(
             train_pool,
@@ -223,9 +227,9 @@ class PhotoZCatBoostPipeline:
 
         self.model = CatBoostRegressor(**params)
         # Create pools
-        train_pool = Pool(self.X_train, self.y_train)
-        val_pool = Pool(self.X_val, self.y_val)
-        
+        train_pool = Pool(self.X_train, self.y_train,cat_features=[len(self.feature_names)-1] if 'TYPE' in self.feature_names else None)
+        val_pool = Pool(self.X_val, self.y_val,cat_features=[len(self.feature_names)-1] if 'TYPE' in self.feature_names else None)
+
         # Continue training
         self.model.fit(
             train_pool,
@@ -253,10 +257,12 @@ class PhotoZCatBoostPipeline:
             random_seed=self.random_state,
             verbose=100
         )
+        cat_indices = [i for i, name in enumerate(self.feature_names) if name == 'TYPE'] if 'TYPE' in self.feature_names else None
+
         
         # Run cross-validation
         cv_results = cv(
-            Pool(self.X_train, self.y_train),
+            Pool(self.X, self.y, cat_features=cat_indices),
             params=cv_model.get_params(),
             fold_count=fold_count,
             early_stopping_rounds=200,
@@ -491,7 +497,7 @@ def main():
     DR1, legacy = pipeline.load_astronomical_data()
     legacy = pipeline.compute_magnitudes(legacy)
     legacy_filtered, DR1_filtered = pipeline.filter_data(legacy, DR1)
-    X, y = pipeline.prepare_ml_data(legacy_filtered, DR1_filtered, feature_names=['MAG_GR', 'MAG_G', 'MAG_RZ', 'MAG_R', 'MAG_RW1', 'MAG_ZW1', 'MAG_W1W2','TYPE','SERSIC'])
+    X, y = pipeline.prepare_ml_data(legacy_filtered, DR1_filtered, feature_names=['MAG_GR', 'MAG_G', 'MAG_RZ', 'MAG_R', 'MAG_RW1', 'MAG_ZW1', 'MAG_W1W2'])
     pipeline.create_data_splits(X, y)
     
     # Execute based on mode
@@ -503,7 +509,7 @@ def main():
             learning_rate=args.learning_rate
         )
         pipeline.evaluate_model()
-        pipeline.save_model("catboost_model_new.cbm")
+        pipeline.save_model(args.model_path if args.model_path else "catboost_model_test.cbm")
         
     elif args.mode == 'continue':
         if not args.model_path:
