@@ -46,11 +46,16 @@ class PhotoZCatBoostPipeline:
         # Load DR1 data
         north_DR1 = Table(fitsio.FITS('/Storage/animesh/PECVEL/LEGACY+DR1/TABLE_DR1_north_v1_sep_1.fits')[1].read())
         south_DR1 = Table(fitsio.FITS('/Storage/animesh/PECVEL/LEGACY+DR1/TABLE_DR1_south_v1_sep_1.fits')[1].read())
+        #north_DR1 = Table(fitsio.FITS('../LEGACY+DR1/TABLE_DR1_north_v1_sep_1.fits')[1].read())
+        #south_DR1 = Table(fitsio.FITS('../LEGACY+DR1/TABLE_DR1_south_v1_sep_1.fits')[1].read())
         DR1 = vstack([north_DR1, south_DR1])
 
         # Load Legacy data
         north_legacy = Table(fitsio.FITS('/Storage/animesh/PECVEL/LEGACY+DR1/TABLE_legacy_north_v1_sep_1.fits')[1].read())
         south_legacy = Table(fitsio.FITS('/Storage/animesh/PECVEL/LEGACY+DR1/TABLE_legacy_south_v1_sep_1.fits')[1].read())
+
+        #north_legacy = Table(fitsio.FITS('../LEGACY+DR1/TABLE_legacy_north_v1_sep_1.fits')[1].read())
+        #south_legacy = Table(fitsio.FITS('../LEGACY+DR1/TABLE_legacy_south_v1_sep_1.fits')[1].read())
         legacy = vstack([north_legacy, south_legacy])
         
         load_time = time.time() - start_time
@@ -69,15 +74,16 @@ class PhotoZCatBoostPipeline:
             flux = np.array(legacy[f'FLUX_{band}'])
             trans = np.array(legacy[f'MW_TRANSMISSION_{band}'])
             frac = flux / trans
-            
-            mag = np.empty_like(frac)
-            mag_noext = np.empty_like(frac)
+            valid = (frac > 0) & np.isfinite(frac)
+
+            mag = np.full_like(frac, fill_value=np.nan)
+            mag_noext = np.full_like(frac, fill_value=np.nan)
             
             # Handle zero/negative fluxes
-            positive_mask = (frac > 0)
-            np.log10(flux, out=mag_noext, where=positive_mask)
-            np.log10(frac, out=mag, where=positive_mask)
             
+            np.log10(flux, out=mag_noext, where=valid)
+            np.log10(frac, out=mag, where=valid)
+
             MAG[band] = 22.5 - 2.5 * mag
             MAG_NOEXT[band] = 22.5 - 2.5 * mag_noext
             
@@ -129,8 +135,8 @@ class PhotoZCatBoostPipeline:
     def prepare_ml_data(self, legacy_filtered, DR1_filtered, feature_names=None):
         """Prepare machine learning dataset"""
         if feature_names is None:
-            feature_names = ['MAG_GR', 'MAG_G', 'MAG_RZ', 'MAG_R', 'MAG_RW1', 'MAG_ZW1', 'MAG_W1W2']
-        
+            #feature_names = ['MAG_GR', 'MAG_G', 'MAG_RZ', 'MAG_R', 'MAG_RW1', 'MAG_ZW1', 'MAG_W1W2']
+            feature_names = ['MAG_G','MAG_R','MAG_Z','MAG_W1','MAG_W2','MAG_W3','MAG_GR','MAG_RZ','MAG_GZ','MAG_W1W2','MAG_W2W3','MAG_W1W3','MAG_RW1','MAG_RW2','MAG_RW3','MAG_GW1','MAG_GW2','MAG_GW3','MAG_ZW1','MAG_ZW2','MAG_ZW3','SERSIC','TYPE']
         self.feature_names = feature_names
         logger.info(f"Using features: {feature_names}")
         missing_features = [f for f in feature_names if f not in legacy_filtered.colnames]
@@ -497,7 +503,8 @@ def main():
     DR1, legacy = pipeline.load_astronomical_data()
     legacy = pipeline.compute_magnitudes(legacy)
     legacy_filtered, DR1_filtered = pipeline.filter_data(legacy, DR1)
-    X, y = pipeline.prepare_ml_data(legacy_filtered, DR1_filtered, feature_names=['MAG_GR', 'MAG_G', 'MAG_RZ', 'MAG_R', 'MAG_RW1', 'MAG_ZW1', 'MAG_W1W2'])
+    #X, y = pipeline.prepare_ml_data(legacy_filtered, DR1_filtered, feature_names=['MAG_GR', 'MAG_G', 'MAG_RZ', 'MAG_R', 'MAG_RW1', 'MAG_ZW1', 'MAG_W1W2','MAG_Z',''])
+    X,y = pipeline.prepare_ml_data(legacy_filtered, DR1_filtered, feature_names=['MAG_G','MAG_R','MAG_Z','MAG_W1','MAG_W2','MAG_W3','MAG_GR','MAG_RZ','MAG_GZ','MAG_W1W2','MAG_W2W3','MAG_W1W3','MAG_RW1','MAG_RW2','MAG_RW3','MAG_GW1','MAG_GW2','MAG_GW3','MAG_ZW1','MAG_ZW2','MAG_ZW3','SERSIC','TYPE'])
     pipeline.create_data_splits(X, y)
     
     # Execute based on mode
@@ -509,7 +516,7 @@ def main():
             learning_rate=args.learning_rate
         )
         pipeline.evaluate_model()
-        pipeline.save_model(args.model_path if args.model_path else "catboost_model_test.cbm")
+        pipeline.save_model(args.model_path if args.model_path else "catboost_model_full_features_mag_typeser.cbm")
         
     elif args.mode == 'continue':
         if not args.model_path:
