@@ -19,6 +19,10 @@ import warnings
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+parser = argparse.ArgumentParser(description="Grid minimize script")
+parser.add_argument('--test', action='store_true', help='Run a test minimization')
+
+args = parser.parse_args()
 class Dataprocessor:
     def __init__(self):
         self.north_path = "/storage/shadab/data/legacy_survey/dr9/north/sweep/9.0/"
@@ -105,6 +109,9 @@ class Dataprocessor:
                     #output_path = os.path.join(output_dir, fname.replace(".fits", "_selected.fits"))
                     file_pairs.append((os.path.join(self.north_path, fname),
                                     os.path.join(self.north_path2, pz_name)))
+        if args.test:
+            file_pairs_ix = np.random.choice(len(file_pairs),20)
+            file_pairs= [file_pairs[i] for i in file_pairs_ix]
         logger.info(f"Total file pairs to process: {len(file_pairs)}")
         with Pool(n_jobs) as pool:
             results= pool.map(self._load_and_preprocess, file_pairs)
@@ -112,8 +119,8 @@ class Dataprocessor:
         logger.info("Combining all chunks into a single table...")
         logger.info("Loaded the data")
         self.table_full = vstack(results)
-        self.table_full = BGS_mask(self.table_full)
-        logger.info("After BGS mask, table length: %d", len(self.table_full))
+        #self.table_full = BGS_mask(self.table_full)
+        #logger.info("After BGS mask, table length: %d", len(self.table_full))
         #return results 
     @staticmethod
     def get_BGS_mask(table: Table) -> np.ndarray:
@@ -148,7 +155,9 @@ class Dataprocessor:
             (table['FRACIN_R'] > 0.2) &
             (table['FRACIN_Z'] > 0.2)
         )
-        return cuts2
+        mask1 = (table['FLUX_G'] != 0) & (table['FLUX_R'] != 0) & (table['FLUX_Z'] != 0)
+
+        return cuts2 & mask1
     @staticmethod
     def get_selection_mask(table: Table) -> np.ndarray:
         """Return boolean mask for selection cuts - does NOT modify table"""
@@ -163,6 +172,7 @@ class Dataprocessor:
             (table['Z_PHOT_MEDIAN'] < 0.15) &
             (table['Z_PHOT_L95'] < 0.1)
         )
+        
         return cuts
     @staticmethod
     def get_combined_mask(table: Table) -> np.ndarray:
@@ -245,19 +255,21 @@ class Dataprocessor:
 
         self.table = self._unique_table()
         #logger.info("Final table length after removing duplicates: %d", len(self.table))
+        return self.table
 
     def apply_zeropoint(self,table:Table    ,zero_point_G,zero_point_R): 
         """DEPRECATED: This modifies table_full in place - dangerous for minimization!"""
         logger.info("Applying zero-point corrections...")   
         self.table_full['MAG_G'] -= zero_point_G
         self.table_full['MAG_R'] -= zero_point_R
-        #return table
     def _unique_table(self):
         """DEPRECATED"""
         logger.info("Removing duplicate entries...")
         logger.info("Table length before removing duplicates: %d", len(self.table))
         #_, unique_indices = np.unique(self.table[['BRICKID','BRICKNAME','OBJID']], return_index=True)
         self.table = unique(self.table, keys=['BRICKID','BRICKNAME','OBJID'])
+        logger.info("Table length after removing duplicates: %d", len(self.table))
+        return self.table
         logger.info("Table length after removing duplicates: %d", len(self.table))
 
     
@@ -296,7 +308,7 @@ class WthetaEstimator:
         
         # Set up bins once
         nbins = 200
-        min_sep = 0.001
+        min_sep = 0.01
         max_sep = 10
         self._bins_cache = np.logspace(np.log10(min_sep), np.log10(max_sep), nbins + 1)
         
@@ -329,7 +341,7 @@ class WthetaEstimator:
         DD_counts = DDtheta_mocks(1, self.nthreads, self._bins_cache, RA_data, DEC_data)
 
         logger.info("Calculating DR counts...")
-        DR_counts = DDtheta_mocks(0,self.nthreads, self._bins_cache, RA_data, DEC_data, self._randoms_cache['RA'], self._randoms_cache['DEC'])
+        DR_counts = DDtheta_mocks(0,self.nthreads, self._bins_cache, RA_data, DEC_data, RA2=self._randoms_cache['RA'], DEC2=self._randoms_cache['DEC'])
         logger.info("Using cached RR counts...")
         logger.info("Converting counts to w(theta)...")
         
@@ -342,7 +354,8 @@ class WthetaEstimator:
 class ZeroPointOptimizer:
     def __init__(self, data_processor: Dataprocessor, reference_w_theta: np.ndarray, nthreads:int=100):
         self.data_processor = data_processor
-        self.reference_w_theta = reference_w_theta
+        self.reference_w_theta = reference_w_theta[1]
+        self.reference_theta_bins = reference_w_theta[0]
         self.w_theta_estimator = WthetaEstimator(nthreads=nthreads)
         logger.info("Pre-initializing randoms and RR counts...")
         self.w_theta_estimator._initialize_randoms_and_bins()
@@ -354,21 +367,55 @@ class ZeroPointOptimizer:
         self.iteration += 1
         zp_G, zp_R = zero_points
         logger.info("Iteration %d: Testing zero points G=%.4f, R=%.4f", self.iteration, zp_G, zp_R)
-        table_copy = self.data_processor.table_full.copy()
+        table_copy = Table()
+        for col in self.data_processor.table_full.colnames:
+            table_copy[col] = self.data_processor.table_full[col].copy()
+        
+        # DEBUGGING: Check magnitudes BEFORE shift
+        mag_g_before = np.array(table_copy['MAG_G'][:5].copy())
+        mag_r_before = np.array(table_copy['MAG_R'][:5].copy())
+        
         table_copy['MAG_G'] -= zp_G
         table_copy['MAG_R'] -= zp_R
+        table_copy['FIBERMAG_R'] -= zp_R  
+        
+        # DEBUGGING: Check magnitudes AFTER shift
+        mag_g_after = table_copy['MAG_G'][:5]
+        mag_r_after = table_copy['MAG_R'][:5]
+        #logger.info(f"MAG_G before: {mag_g_before}")
+        #logger.info(f"MAG_G after:  {mag_g_after}")
+        #logger.info(f"MAG_G change: {mag_g_after - mag_g_before}")
+        #logger.info(f"MAG_R before: {mag_r_before}")
+        #logger.info(f"MAG_R after:  {mag_r_after}")
+        #logger.info(f"MAG_R change: {mag_r_after - mag_r_before}")
         selection_mask = Dataprocessor.get_selection_mask(table_copy)
         bgs_mask = Dataprocessor.get_BGS_mask(table_copy)
         combined_mask = selection_mask & bgs_mask
+        #DEBUG
+        n_selection = np.sum(selection_mask)
+        n_bgs = np.sum(bgs_mask)
+        n_combined = np.sum(combined_mask)
+        logger.info(f"Selection mask: {n_selection}/{len(table_copy)} objects")
+        logger.info(f"BGS mask: {n_bgs}/{len(table_copy)} objects")
+        logger.info(f"Combined: {n_combined}/{len(table_copy)} objects")
+
         selected_table = table_copy[combined_mask]
         unique_mask = Dataprocessor.remove_duplicates_mask(selected_table)
         selected_table = selected_table[unique_mask]
         logger.info(f"Selected {len(selected_table)} objects after all cuts")
+        logger.info(f"RA range: [{selected_table['RA'].min():.2f}, {selected_table['RA'].max():.2f}]")
+        logger.info(f"DEC range: [{selected_table['DEC'].min():.2f}, {selected_table['DEC'].max():.2f}]")
+
         try:
             theta_bins, w_theta_computed = self.w_theta_estimator.estimate_w_theta(selected_table)
         except Exception as e:
             logger.error(f"Error computing w_theta: {e}")
             return 1e10
+        
+        w_theta_computed = w_theta_computed[theta_bins>0.01]
+        self.reference_w_theta = self.reference_w_theta[self.reference_theta_bins>0.01]
+
+ 
         chi_squared = np.sum((w_theta_computed - self.reference_w_theta)**2)
         logger.info("Chi-squared: %.6f", chi_squared)
         self.results_history.append({
@@ -379,10 +426,10 @@ class ZeroPointOptimizer:
             'n_objects': len(selected_table)
         })
         return chi_squared
-    def run_minimization(self, initial_guess=(0.0, 0.0),bounds = [(-0.5,0.5),(-0.5,0.5)]):
+    def run_minimization(self, initial_guess=(0.02, 0.04),bounds = [(-0.5,0.5),(-0.5,0.5)]):
         logger.info("Starting minimization with initial guess G=%.4f, R=%.4f", initial_guess[0], initial_guess[1])
 
-        result = minimize(self.objective_function, initial_guess, method='L-BFGS-B',options={'disp': True},bounds=bounds)
+        result = minimize(self.objective_function, initial_guess, method='Nelder-Mead',options={'disp': True,'maxiter':60000},tol = 1e-10,bounds=bounds)
 
         logger.info(f"\n{'='*60}")
         logger.info("Optimization Complete!")
@@ -393,6 +440,13 @@ class ZeroPointOptimizer:
         logger.info(f"Success: {result.success}")
         logger.info(f"Message: {result.message}")
         return result
+    def save_results(self, filename: str):
+        """Save optimization history"""
+        import pandas as pd
+        df = pd.DataFrame(self.results_history)
+        df.to_csv(filename, index=False)
+        logger.info(f"Results saved to {filename}")
+
 
 
 
@@ -403,21 +457,31 @@ class ZeroPointOptimizer:
 if __name__ == '__main__':
     logger.info("STEP 1: Loading all data")
     inst = Dataprocessor()
-    inst.load_data( n_jobs=100)
+    inst.load_data( n_jobs=150)
     print('length of full table is:',len(inst.table_full))
-    logger.info("STEP 2: Computing w(theta)")
-    table_ref = inst.table_full.copy()
-    ref_mask = Dataprocessor.get_selection_mask(table_ref)
-    table_ref = table_ref[ref_mask]
-    unique_mask = Dataprocessor.remove_duplicates_mask(table_ref)
-    table_ref = table_ref[unique_mask]
-    print('Length after cuts is:',len(table_ref))
-    w_theta_estimator = WthetaEstimator(nthreads=100)
-    theta_bins, reference_w_theta = w_theta_estimator.estimate_w_theta(table_ref)
+    # logger.info("STEP 2: Computing w(theta)")
+    # table_ref = inst.table_full.copy()
+    # logger.info("Applying zero-point shifts for reference w(theta)")
+    # table_ref['MAG_G']-=0.04
+    # table_ref['MAG_R']-=0.0
+
+
+    # ref_mask = Dataprocessor.get_combined_mask(table_ref)
+    
+    # table_ref = table_ref[ref_mask]
+    # unique_mask = Dataprocessor.remove_duplicates_mask(table_ref)
+    # table_ref = table_ref[unique_mask]
+    # print('Length after cuts is:',len(table_ref))
+
+    #theta_bins, reference_w_theta = w_theta_estimator.estimate_w_theta(table_ref)
+    #np.save('0.0_0.04_zpshift',[theta_bins,reference_w_theta])
+    logger.info("STEP 2: Loading reference w(theta)")
+    minimizer = ZeroPointOptimizer(inst, reference_w_theta=np.load('/user/animesh.sah/w_theta_results/corrfunc_south_0.01_to_10.npy',allow_pickle=True), nthreads=100)
 
 
 
-
+    minimizer.run_minimization(initial_guess=(0.04, -0.06),bounds = [(-0.2,0.2),(-0.2,0.2)])
+    minimizer.save_results('minimization_folder/Minmizer_NM_6.csv')
 
 
 
@@ -455,5 +519,6 @@ if __name__ == '__main__':
 
         
         
+
 
 
