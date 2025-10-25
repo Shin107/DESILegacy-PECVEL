@@ -10,12 +10,14 @@ import argparse
 import pickle
 from scipy.optimize import minimize
 import logging 
-
+from scipy.optimize import basinhopping
 import Corrfunc
 from Corrfunc.mocks.DDtheta_mocks import DDtheta_mocks
 from Corrfunc.io import read_catalog
 from Corrfunc.utils import convert_3d_counts_to_cf
 import warnings
+from itertools import product
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -426,11 +428,13 @@ class ZeroPointOptimizer:
             'n_objects': len(selected_table)
         })
         return chi_squared
-    def run_minimization(self, initial_guess=(0.02, 0.04),bounds = [(-0.5,0.5),(-0.5,0.5)]):
+    def run_minimization(self, initial_guess=(0.02, 0.04),bounds = [(-0.5,0.5),(-0.5,0.5)],minimizer_kwargs=None):
         logger.info("Starting minimization with initial guess G=%.4f, R=%.4f", initial_guess[0], initial_guess[1])
-
-        result = minimize(self.objective_function, initial_guess, method='Nelder-Mead',options={'disp': True,'maxiter':60000},tol = 1e-10,bounds=bounds)
-
+        if minimizer_kwargs is None:
+ 
+            result = minimize(self.objective_function, initial_guess, method='Nelder-Mead',options={'disp': True,'maxiter':60000},tol = 1e-10,bounds=bounds)
+        else: 
+            result = basinhopping(self.objective_function, initial_guess, minimizer_kwargs=minimizer_kwargs or {'method': 'Nelder-Mead'}, niter=500, disp=True,stepsize=0.02)
         logger.info(f"\n{'='*60}")
         logger.info("Optimization Complete!")
         logger.info(f"{'='*60}")
@@ -475,14 +479,36 @@ if __name__ == '__main__':
 
     #theta_bins, reference_w_theta = w_theta_estimator.estimate_w_theta(table_ref)
     #np.save('0.0_0.04_zpshift',[theta_bins,reference_w_theta])
-    logger.info("STEP 2: Loading reference w(theta)")
-    minimizer = ZeroPointOptimizer(inst, reference_w_theta=np.load('/user/animesh.sah/w_theta_results/corrfunc_south_0.01_to_10.npy',allow_pickle=True), nthreads=100)
 
 
 
-    minimizer.run_minimization(initial_guess=(0.04, -0.06),bounds = [(-0.2,0.2),(-0.2,0.2)])
-    minimizer.save_results('minimization_folder/Minmizer_NM_6.csv')
 
+    # logger.info("STEP 2: Loading reference w(theta)")
+    minimizer = ZeroPointOptimizer(inst, reference_w_theta=np.load('/user/animesh.sah/w_theta_results/corrfunc_south_0.01_to_10.npy',allow_pickle=True), nthreads=15)
+    # minimizer.run_minimization(initial_guess=(-0.02, 0.04),bounds = [(-0.2,0.2),(-0.2,0.2)],minimizer_kwargs={'method':'Nelder-Mead','options':{'disp': True,'maxiter':500},'tol':1e-12})
+    # minimizer.save_results('minimization_folder/Minmizer_NM_basinhopping_v2.csv')
+
+    from multiprocessing import Pool, cpu_count
+    from concurrent.futures import ThreadPoolExecutor
+    n_points = 30
+    values = np.linspace(-0.05, 0.05, n_points)
+    # X, Y = np.meshgrid(values, values, indexing='xy')
+    # grid_points = np.column_stack((X.ravel(), Y.ravel()))
+    chi_squared = []
+    points = list(product(values, repeat=2))
+    n_cpus = min(cpu_count(), 8) 
+    print(cpu_count(),n_cpus)
+    with open('minimization_folder/chi_squared_grid.txt', 'w') as f:
+        f.write("zp_G,zp_R,chi_squared\n")
+    
+    with ThreadPoolExecutor(max_workers=n_cpus) as executor:
+        for point, chi2 in zip(points, executor.map(minimizer.objective_function, points)):
+            with open('minimization_folder/chi_squared_grid.txt', 'a') as f:
+                f.write(f"{point[0]:.6f},{point[1]:.6f},{chi2:.6e}\n")
+            chi_squared.append(chi2)
+    chi_squared = np.array(chi_squared).reshape((n_points, n_points))
+    np.save('minimization_folder/chi_squared_grid.npy', chi_squared)
+    
 
 
 
