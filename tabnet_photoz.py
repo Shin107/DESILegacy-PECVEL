@@ -117,6 +117,17 @@ class PhotoZTabNetPipeline:
         
         return legacy
     
+    def weighted_sigmoid(self, center=19,steepness =3.0):
+        #print(self.X[:,1])
+        #print('shape of X[:,1]:',self.X[:,1].shape)
+        x = np.asarray(self.X_train[:, 1], dtype=float)
+
+        z = steepness * (x - center)
+
+        weights = 1 / (1 + np.exp(z))
+        normed_weights = weights / np.mean(weights)  # Normalize to mean of 1
+        return normed_weights
+
     def _add_features(self, legacy):
         """Add additional features to the dataset"""
         e1, e2 = legacy['SHAPE_E1'], legacy['SHAPE_E2']
@@ -200,6 +211,14 @@ class PhotoZTabNetPipeline:
             X_test = self.scaler.transform(X_test)
             X = self.scaler.transform(X)
             self.X = X
+
+        # Save scaler with same name as model (if model_path is provided)
+        if hasattr(self, 'model_path') and self.model_path:
+            scaler_filename = f"{Path(self.model_path).stem}_scaler.pkl"
+            scaler_path = Path(self.model_path).parent / scaler_filename
+            with open(scaler_path, 'wb') as f:
+                pickle.dump(self.scaler, f)
+                logger.info(f"Scaler saved to {scaler_path}")
         
         # Store splits in the class
         self.X_train, self.X_val, self.X_test = X_train, X_val, X_test
@@ -209,14 +228,16 @@ class PhotoZTabNetPipeline:
         
         return X_train, X_val, X_test, y_train, y_val, y_test
 
-    def train_new_model(self, n_d=64, n_a=64, n_steps=5, gamma=1.5, 
+    def train_new_model(self, n_d=32, n_a=32, n_steps=6, gamma=1.3, 
                        n_independent=2, n_shared=2, lambda_sparse=1e-4,
-                       max_epochs=200, patience=20, batch_size=8192,virtual_batch_size=512,num_workers=8):
+                       max_epochs=200, patience=20, batch_size=8192,virtual_batch_size=512,num_workers=8,weight=None):
         """Train a fresh TabNet model from scratch"""
         logger.info("Training new TabNet model...")
         effective_batch_size = batch_size * max(1, self.num_gpus // 2)
         logger.info(f"Using effective batch size: {effective_batch_size}")
-        
+        if weight=='sigmoid':
+            weights = self.weighted_sigmoid(center = 19, steepness=3.0      )
+            logger.info("Using weighted sigmoid for sample weights")
         self.model = TabNetRegressor(
             n_d=n_d,
             n_a=n_a,
@@ -226,7 +247,7 @@ class PhotoZTabNetPipeline:
             n_shared=n_shared,
             lambda_sparse=lambda_sparse,
             optimizer_fn=torch.optim.Adam,
-            optimizer_params=dict(lr=2e-2, weight_decay=1e-5),
+            optimizer_params=dict(lr=1e-3, weight_decay=1e-5),
             scheduler_params={"step_size": 50, "gamma": 0.9},
             scheduler_fn=torch.optim.lr_scheduler.StepLR,
             mask_type='entmax',
@@ -367,7 +388,7 @@ class PhotoZTabNetPipeline:
             timestamp = int(time.time())
             stem, suffix = path.stem, path.suffix
             filename = f"{stem}_{timestamp}{suffix}"
-        
+        self.model_path = filename
         self.model.save_model(filename)
         
         # Save scaler
@@ -489,10 +510,10 @@ def main():
     parser.add_argument("--model_path", type=str, help="Path to saved model")
     parser.add_argument("--epochs", type=int, default=200, help="Maximum number of epochs")
     parser.add_argument("--patience", type=int, default=20, help="Early stopping patience")
-    parser.add_argument("--batch_size", type=int, default=1024*16, help="Batch size")
-    parser.add_argument("--virtual_batch_size", type=int, default=512, help="Virtual batch size")
-    parser.add_argument("--n_d", type=int, default=64, help="Width of decision prediction layer")
-    parser.add_argument("--n_a", type=int, default=64, help="Width of attention embedding")
+    parser.add_argument("--batch_size", type=int, default=2048, help="Batch size")
+    parser.add_argument("--virtual_batch_size", type=int, default=128, help="Virtual batch size")
+    parser.add_argument("--n_d", type=int, default=32, help="Width of decision prediction layer")
+    parser.add_argument("--n_a", type=int, default=32, help="Width of attention embedding")
     parser.add_argument("--n_steps", type=int, default=5, help="Number of steps in the architecture")
     parser.add_argument('--plot', type=str, default=None, 
                        help='Plot type: 2d_hist_valid, 2d_hist_test, 2d_hist_complete, feature_importance')
@@ -531,7 +552,7 @@ def main():
             batch_size=args.batch_size,
         )
         pipeline.evaluate_model()
-        pipeline.save_model(args.model_path if args.model_path else "tabnet_photoz_model.zip")
+        pipeline.save_model(args.model_path if args.model_path else "tabnet_photoz_model_sigmoid.zip")
         pipeline.plot_feature_importance()
         
     elif args.mode == 'evaluate':
