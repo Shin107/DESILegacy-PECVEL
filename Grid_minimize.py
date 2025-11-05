@@ -326,6 +326,9 @@ class Dataprocessor:
     def apply_cuts(self,table:Table) -> Table:
         """DEPRECATED: Use get_selection_mask instead. Modifies self.table in place."""
 
+
+
+
         logger.info("Applying selection cuts...")
         logger.info("Initial table length: %d", len(table))
         cuts = (
@@ -501,15 +504,15 @@ class ZeroPointOptimizer:
         """
         
         self.iteration += 1
-        zp_G, zp_R = zero_points
-        logger.info(f"Iteration {self.iteration}: Computing w_theta for G={zp_G:.4f}, R={zp_R:.4f}")
-        
+        zp_G, zp_R, zp_Z = zero_points
+        logger.info(f"Iteration {self.iteration}: Computing w_theta for G={zp_G:.4f}, R={zp_R:.4f}, Z={zp_Z:.4f}")
+
         # Create copy and apply shifts
         table = self.data_processor.table
-        print('Table length before applying zero-point shifts:', len(table))
+        #print('Table length before applying zero-point shifts:', len(table))
         MAG_G = table['MAG_G'] - zp_G
         MAG_R = table['MAG_R'] - zp_R
-        MAG_Z = table['MAG_Z']  # No shift in Z
+        MAG_Z = table['MAG_Z']  - zp_Z
         FIBERMAG_R = table['FIBERMAG_R'] - zp_R
         selection_color_mask = self.data_processor.selection_mag_mask(MAG_G=MAG_G,MAG_R=MAG_R,MAG_Z=MAG_Z)
         bgs_color_mask = self.data_processor.BGS_mag_mask(MAG_G=MAG_G,MAG_R=MAG_R,MAG_Z=MAG_Z,FIBERMAG_R=FIBERMAG_R)
@@ -523,10 +526,10 @@ class ZeroPointOptimizer:
         try:
             theta_bins, w_theta_computed = self.w_theta_estimator.estimate_w_theta(selected_table)
 
-            return (zp_G, zp_R, n_objects, theta_bins, w_theta_computed)
+            return (zp_G, zp_R, zp_Z, n_objects, theta_bins, w_theta_computed)
         except Exception as e:
             logger.error(f"Error computing w_theta: {e}")
-            return (zp_G, zp_R, n_objects,None, None)
+            return (zp_G, zp_R,zp_Z, n_objects,None, None)
         finally:
             del table,selected_table
             gc.collect()
@@ -658,6 +661,7 @@ class WThetaGridStorage:
                               data=results_dict['reference_w_theta'])
             meta.attrs['n_points'] = len(results_dict['grid_values'])
             meta.attrs['creation_date'] = str(np.datetime64('now'))
+            meta.attrs['dimensions'] = 3
             
             # Create group for grid data
             grid_group = f.create_group('grid_data')
@@ -671,27 +675,28 @@ class WThetaGridStorage:
             n_grid = len(results_dict['grid_values'])
             
             # Pre-allocate arrays (2D for 40x40 grid)
-            theta_bins_array = np.full((n_grid, n_grid, max_nbins), np.nan, dtype=np.float32)
-            w_theta_array = np.full((n_grid, n_grid, max_nbins), np.nan, dtype=np.float32)
-            n_objects_array = np.zeros((n_grid, n_grid), dtype=np.int32)
-            valid_mask = np.zeros((n_grid, n_grid), dtype=bool)
-            
+            theta_bins_array = np.full((n_grid, n_grid, n_grid, max_nbins), np.nan, dtype=np.float32)
+            w_theta_array = np.full((n_grid, n_grid, n_grid, max_nbins), np.nan, dtype=np.float32)
+            n_objects_array = np.zeros((n_grid, n_grid, n_grid), dtype=np.int32)
+            valid_mask = np.zeros((n_grid, n_grid, n_grid), dtype=bool)
+
             # Fill arrays
             for i, zp_G in enumerate(results_dict['grid_values']):
                 for j, zp_R in enumerate(results_dict['grid_values']):
-                    key = (zp_G, zp_R)
-                    if key not in results_dict['data']:
-                        continue
-                    
-                    data = results_dict['data'][key]
-                    n_objects_array[i, j] = data['n_objects']
-                    
-                    if data['theta_bins'] is not None and data['w_theta'] is not None:
-                        n_bins = len(data['theta_bins'])
-                        theta_bins_array[i, j, :n_bins] = data['theta_bins']
-                        w_theta_array[i, j, :n_bins] = data['w_theta']
-                        valid_mask[i, j] = True
-            
+                    for k , zp_Z in enumerate(results_dict['grid_values']):
+                        key = (zp_G, zp_R, zp_Z)
+                        if key not in results_dict['data']:
+                            continue
+
+                        data = results_dict['data'][key]
+                        n_objects_array[i, j, k] = data['n_objects']
+
+                        if data['theta_bins'] is not None and data['w_theta'] is not None:
+                            n_bins = len(data['theta_bins'])
+                            theta_bins_array[i, j, k, :n_bins] = data['theta_bins']
+                            w_theta_array[i, j, k, :n_bins] = data['w_theta']
+                            valid_mask[i, j, k] = True
+
             # Save with compression
             grid_group.create_dataset('theta_bins', data=theta_bins_array, 
                                     compression=compression, 
@@ -706,13 +711,14 @@ class WThetaGridStorage:
                                     compression=compression)
             
             # Store actual number of bins used per grid point
-            n_bins_array = np.zeros((n_grid, n_grid), dtype=np.int16)
+            n_bins_array = np.zeros((n_grid, n_grid, n_grid), dtype=np.int16)
             for i, zp_G in enumerate(results_dict['grid_values']):
                 for j, zp_R in enumerate(results_dict['grid_values']):
-                    key = (zp_G, zp_R)
-                    if key in results_dict['data'] and results_dict['data'][key]['theta_bins'] is not None:
-                        n_bins_array[i, j] = len(results_dict['data'][key]['theta_bins'])
-            
+                    for k , zp_Z in enumerate(results_dict['grid_values']):
+                        key = (zp_G, zp_R, zp_Z)
+                        if key in results_dict['data'] and results_dict['data'][key]['theta_bins'] is not None:
+                            n_bins_array[i, j, k] = len(results_dict['data'][key]['theta_bins'])
+
             grid_group.create_dataset('n_bins', data=n_bins_array)
             
         logger.info(f"Saved grid to {filename}")
@@ -720,13 +726,7 @@ class WThetaGridStorage:
     
     @staticmethod
     def load_grid_hdf5(filename):
-        """
-        Load grid results from HDF5 file.
-        
-        Returns:
-        --------
-        results_dict : dict with same structure as original
-        """
+        """Load 3D grid results from HDF5 file."""
         results_dict = {'data': {}}
         
         with h5py.File(filename, 'r') as f:
@@ -741,38 +741,39 @@ class WThetaGridStorage:
             n_objects_array = f['grid_data/n_objects'][:]
             n_bins_array = f['grid_data/n_bins'][:]
             
-            # Reconstruct dictionary
+            # Reconstruct dictionary (3D)
             for i, zp_G in enumerate(results_dict['grid_values']):
                 for j, zp_R in enumerate(results_dict['grid_values']):
-                    n_bins = n_bins_array[i, j]
-                    n_objects = n_objects_array[i, j]
-                    
-                    if n_bins > 0:
-                        theta_bins = theta_bins_array[i, j, :n_bins]
-                        w_theta = w_theta_array[i, j, :n_bins]
-                    else:
-                        theta_bins = None
-                        w_theta = None
-                    
-                    results_dict['data'][(zp_G, zp_R)] = {
-                        'theta_bins': theta_bins,
-                        'w_theta': w_theta,
-                        'n_objects': n_objects
-                    }
+                    for k, zp_Z in enumerate(results_dict['grid_values']):
+                        n_bins = n_bins_array[i, j, k]
+                        n_objects = n_objects_array[i, j, k]
+                        
+                        if n_bins > 0:
+                            theta_bins = theta_bins_array[i, j, k, :n_bins]
+                            w_theta = w_theta_array[i, j, k, :n_bins]
+                        else:
+                            theta_bins = None
+                            w_theta = None
+                        
+                        results_dict['data'][(zp_G, zp_R, zp_Z)] = {
+                            'theta_bins': theta_bins,
+                            'w_theta': w_theta,
+                            'n_objects': n_objects
+                        }
         
         return results_dict
     
     @staticmethod
-    def load_single_point_hdf5(filename, i, j):
+    def load_single_point_hdf5(filename, i, j, k):
         """Load data for a single grid point without loading entire file"""
         with h5py.File(filename, 'r') as f:
             grid_values = f['metadata/grid_values'][:]
-            n_bins = f['grid_data/n_bins'][i, j]
-            n_objects = f['grid_data/n_objects'][i, j]
+            n_bins = f['grid_data/n_bins'][i, j, k]
+            n_objects = f['grid_data/n_objects'][i, j, k]
             
             if n_bins > 0:
-                theta_bins = f['grid_data/theta_bins'][i, j, :n_bins]
-                w_theta = f['grid_data/w_theta'][i, j, :n_bins]
+                theta_bins = f['grid_data/theta_bins'][i, j, k, :n_bins]
+                w_theta = f['grid_data/w_theta'][i, j, k, :n_bins]
             else:
                 theta_bins = None
                 w_theta = None
@@ -780,47 +781,55 @@ class WThetaGridStorage:
             return {
                 'zp_G': grid_values[i],
                 'zp_R': grid_values[j],
+                'zp_Z': grid_values[k],
                 'theta_bins': theta_bins,
                 'w_theta': w_theta,
                 'n_objects': n_objects
             }
-def run_grid_w_theta(minimizer,values,output_file='w_theta_grid.h5'):
-
+def run_grid_w_theta(minimizer, values, output_file='w_theta_grid_3D.h5'):
     output_dir = os.path.dirname(output_file)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-    n_points = len(values)
+    
+    # Create 3D grid points
     from itertools import product
-    import pandas as pd
-    points = list(product(values, repeat=2))
-    n_cpus = min(cpu_count(), 10) 
-    print(cpu_count(),n_cpus)
+    points = list(product(values, repeat=3))  # Now 3D: (zp_G, zp_R, zp_Z)
+    
+    n_cpus = min(cpu_count(), 1)
+    print(f"CPU count: {cpu_count()}, using: {n_cpus}")
+    
     results_dict = {
-    'grid_values': values,
-    'reference_theta_bins': minimizer.reference_theta_bins,
-    'reference_w_theta': minimizer.reference_w_theta,
-    'data': {}
-}
-    logger.info(f"Starting grid search: {len(points)} points, {n_cpus} CPUs")
+        'grid_values': values,
+        'reference_theta_bins': minimizer.reference_theta_bins,
+        'reference_w_theta': minimizer.reference_w_theta,
+        'data': {}
+    }
+    
+    logger.info(f"Starting 3D grid search: {len(points)} points (50x50x50), {n_cpus} CPUs")
+    
     with ThreadPoolExecutor(max_workers=n_cpus) as executor:
         for i, (point, result) in enumerate(zip(points, 
                                                 executor.map(minimizer.compute_w_theta_for_zeropoints, 
                                                         points))):
-            zp_G, zp_R, n_objects, theta_bins, w_theta = result
-            results_dict['data'][(zp_G, zp_R)] = {
+            zp_G, zp_R, zp_Z, n_objects, theta_bins, w_theta = result
+            results_dict['data'][(zp_G, zp_R, zp_Z)] = {
                 'theta_bins': theta_bins,
                 'w_theta': w_theta,
                 'n_objects': n_objects
             }
+            
+            if (i + 1) % 1000 == 0:
+                logger.info(f"Progress: {i+1}/{len(points)} ({100*(i+1)/len(points):.1f}%)")
+    
     WThetaGridStorage.save_grid_hdf5(results_dict, output_file)
     return results_dict
-    WThetaGridStorage.save_grid_hdf5(results_dict, output_file)
-    return results_dict
+
+
 
 
 if __name__ == '__main__':
     inst = Dataprocessor()
-    inst.load_data(n_jobs=150)
+    inst.load_data(n_jobs=190)
     BGS_static_mask = inst.precompute_BGS_static_mask(table = inst.table_full)
     Selection_static_mask = inst.precompute_selection_static_mask(table = inst.table_full)
     static_mask = BGS_static_mask & Selection_static_mask
@@ -830,11 +839,15 @@ if __name__ == '__main__':
     unique_mask = Dataprocessor.remove_duplicates_mask(inst.table)
     inst.table = inst.table[unique_mask]   
     print('Length after unique mask is:',len(inst.table))
+    c =time.time()
+    elapsed =c -a 
+    minutes = int(elapsed // 60)
+    seconds = elapsed % 60
+    print(f"Data loading time: {minutes} minutes {seconds:.2f} seconds")
+    values = np.linspace(0.15, -0.15, 61)
 
-    values = np.linspace(0.1, -0.1, 10)
-
-    minimizer = ZeroPointOptimizer(inst, reference_w_theta=np.load('/user/animesh.sah/w_theta_results/corrfunc_south_0.01_to_10.npy',allow_pickle=True), nthreads=15)
-    results = run_grid_w_theta(minimizer,values,output_file='w_theta_grid_40x40.h5')
+    minimizer = ZeroPointOptimizer(inst, reference_w_theta=np.load('/user/animesh.sah/w_theta_results/corrfunc_south_0.01_to_10.npy',allow_pickle=True), nthreads=192)
+    results = run_grid_w_theta(minimizer,values,output_file='w_theta_grid_61x61x61.h5')
     b = time.time()
     elapsed = b - a
     minutes = int(elapsed // 60)
