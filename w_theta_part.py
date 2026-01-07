@@ -1,3 +1,6 @@
+
+
+## 01/01/2025 A Sah:  Added weight option for treecorr calculation (only for full sample currently)
 import numpy as np
 import treecorr
 from astropy.io import fits
@@ -30,16 +33,29 @@ parser.add_argument('-m','--method', choices=['treecorr','corrfunc'], default='t
                     help='Which method to use (default: treecorr)')
 parser.add_argument('-e','--error', choices=['jackknife','bootstrap','none'], default='none',
                     help='Which error estimation method to use (default: none)')
+
+parser.add_argument('--sample', type=str, choices= ['FP','BGS'], default='FP',
+                    help='Which sample to use (default: FP)')
+
+parser.add_argument('--add_weights', action='store_true',default=False,
+                    help='If true, adds weights to the correlation function calculation (only for treecorr)')
+parser.add_argument('--nside_weight', type=int, default=64,
+                    help='nside used for  healpix weights')
+parser.add_argument('--multiple_patch', action='store_true',default=False,
+                    help='If true, runs for multiple patch numbers (only for treecorr with jackknife or bootstrap)')
 args = parser.parse_args()
 part = args.part
 method = args.method
 error = args.error
-
+WGT = args.add_weights
+nside_weight = args.nside_weight
 if part=='full':
     table_selection = Table(fitsio.FITS('table_match_final.fits')[1].read())
 else:
     if part == 'north':
-        table_selection = Table(fitsio.FITS('/user/animesh.sah/FP_CUTS/north_cuts_v9_zeropoint_shifted_0.0234.fits')[1].read())
+        #table_selection = Table(fitsio.FITS('/user/animesh.sah/FP_CUTS/north_cuts_v9.fits')[1].read())
+        table_selection = Table(fitsio.FITS(f'../FP_CUTS/table_{part}_unique.fits')[1].read())
+
     else:
         table_selection = Table(fitsio.FITS(f'../FP_CUTS/table_{part}_unique.fits')[1].read())
 
@@ -47,8 +63,16 @@ if part=='north':
     table_selection = table_selection[table_selection['DEC']>=32.375]
 elif part=='south':
     table_selection = table_selection[table_selection['DEC']<32.375]
-RA_data,DEC_data = table_selection['RA'], table_selection['DEC']
 
+
+
+if args.sample=='BGS':
+    if part == 'north':
+        table_selection  = Table(fitsio.FITS('/user/animesh.sah/DESI_PECVEL/TABLE_legacy_north_v1_sep_1_all_features.fits')[1].read())
+    elif part == 'south':
+        table_selection  = Table(fitsio.FITS('/user/animesh.sah/DESI_PECVEL/TABLE_legacy_south_v1_sep_1_all_features.fits')[1].read())
+
+RA_data,DEC_data = table_selection['RA'], table_selection['DEC']
 randoms = Table(fitsio.FITS('/user/animesh.sah/FP_CUTS/randoms_5M.fits')[1].read())
 if part=='north':
     rand_table = randoms[randoms['PHOTSYS']=='N']
@@ -70,16 +94,41 @@ DEC_data  = np.ascontiguousarray(np.array(DEC_data, dtype=np.float64))
 RA_random = np.ascontiguousarray(np.array(RA_random, dtype=np.float64))
 DEC_random= np.ascontiguousarray(np.array(DEC_random, dtype=np.float64))
 
-nbins = 200
-nthreads=100
-min_sep = 0.001  # degrees, example
-max_sep = 10   # degrees
+
+
+
+nbins = 50
+nthreads=192
+min_sep = 0.01  # degrees,
+max_sep = 15   # degrees
 N = len(RA_data)
 rand_N = len(RA_random)
 print('Theta value ranging from',min_sep,'to',max_sep,'in',nbins,'bins')
 print('Length of data is',N)
 print('Length of Random is',rand_N)
 print("Ratio is:",rand_N/N)
+import time 
+a = time.time()
+
+def coords_to_pix(ra_deg, dec_deg, nside,**kwargs):
+    theta = np.radians(90.0 - dec_deg)  
+    phi   = np.radians(ra_deg)
+    ipix  = hp.ang2pix(nside, theta, phi,**kwargs)
+    return ipix
+
+
+
+if WGT:
+    print('Adding weights to the calculation')
+    print('Nside for weights is:',nside_weight)
+
+    weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/{part}_combined_systematic_weights_nside{nside_weight}.fits')
+    if part=='south':
+        weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/south_CSFD_systematic_weights_nside64.fits')
+    data_ipix = coords_to_pix(RA_data, DEC_data, nside_weight)
+    random_ipix = coords_to_pix(RA_random, DEC_random, nside_weight)
+    data_weights = weight_file[data_ipix]
+    random_weights = weight_file[random_ipix]
 
 
 # def w_theta_corrfunc(ra_data,dec_data,ra_random,dec_random,min_sep=0.001,max_sep=100,nbins=0,nthreads=120):
@@ -110,7 +159,7 @@ def w_theta_corrfunc(ra_data,dec_data,ra_random,dec_random,min_sep=min_sep,max_s
     DR_counts = DDtheta_mocks(autocorr, nthreads, bins,ra_data, dec_data,RA2=ra_random, DEC2=dec_random)
     autocorr=1
     RR_counts = DDtheta_mocks(autocorr, nthreads, bins,ra_random,dec_random)
-    wtheta = convert_3d_counts_to_cf(RA_data.size, RA_data.size, RA_random.size, RA_random.size, DD_counts, DR_counts,DR_counts, RR_counts)
+    wtheta = convert_3d_counts_to_cf(ra_data.size, ra_data.size, ra_random.size, ra_random.size, DD_counts, DR_counts,DR_counts, RR_counts)
     return (bins[1:]+bins[:-1])/2,wtheta
     
 
@@ -118,9 +167,12 @@ def w_theta_corrfunc(ra_data,dec_data,ra_random,dec_random,min_sep=min_sep,max_s
 
 
 if method=='treecorr' and error=='none':
-    cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg')
-
-    cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, ra_units='deg', dec_units='deg')
+    if WGT:
+        cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, w=random_weights, ra_units='deg', dec_units='deg')
+        cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, w=data_weights, ra_units='deg', dec_units='deg')
+    else:
+        cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg')
+        cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, ra_units='deg', dec_units='deg')
 
     dd = treecorr.NNCorrelation(min_sep=min_sep, max_sep=max_sep, nbins=nbins ,sep_units='deg'  ,  bin_type='Log'  )# bins are spaced evenly in log10(sep)
     dr =  treecorr.NNCorrelation(min_sep=min_sep, max_sep=max_sep, nbins=nbins ,sep_units='deg' ,  bin_type='Log' )
@@ -141,7 +193,11 @@ if method=='treecorr' and error=='none':
     #print(rr.meanr)
     #print(dd.meanr - dr.meanr)
     #print(dd.meanlogr)
-    np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{min_sep}_to_{max_sep}.npy', np.vstack([dd.meanr,xi,sig]))
+    if args.sample=='FP':
+        np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([dd.meanr,xi,sig]))
+    else:
+        np.save(f'/user/animesh.sah/w_theta_results/treecorr_DR1cross_matched_{part}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([dd.meanr,xi,sig]))
+
 
 elif method=='corrfunc' and error=='none':
 
@@ -160,7 +216,7 @@ elif method=='corrfunc' and error=='none':
     RR_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_random,DEC_random)
     wtheta = convert_3d_counts_to_cf(RA_data.size, RA_data.size, RA_random.size, RA_random.size, DD_counts, DR_counts,DR_counts, RR_counts)
     print('W_theta',wtheta)
-    np.save(f'/user/animesh.sah/w_theta_results/corrfunc_{part}_{min_sep}_to_{max_sep}_0.0234_v2.npy', np.vstack([(bins[1:]+bins[:-1])/2,wtheta]))
+    np.save(f'/user/animesh.sah/w_theta_results/corrfunc_{part}_{min_sep}_to_{max_sep}.npy', np.vstack([(bins[1:]+bins[:-1])/2,wtheta]))
 
 def hist_pix(ra,dec,nside=6):
     npix = hp.nside2npix(nside)
@@ -193,7 +249,7 @@ def prepare_jackknife(RA,DEC,nside=6):
 def leave_one_out_data(RA,DEC,index,nside=6):
     # takes in RA and DEC and the index of the pixel to be removed
     # returns the RA and DEC after removing the pixel
-    npix,jk_indexes,indexes = prepare_jackknife(RA,DEC,nside=nside)
+    #npix,jk_indexes,indexes = prepare_jackknife(RA,DEC,nside=nside)
     mask = npix != index
     return RA[mask], DEC[mask]
 def leave_one_out_random(RA,DEC,index,nside=6):
@@ -291,10 +347,12 @@ if error!= 'none' and method == 'corrfunc':
             random_jk= pool.starmap(leave_one_out_random, [(RA_random, DEC_random, index, nside) for index in jk_indexes])
             w_jk=pool.starmap(w_theta_corrfunc, [(data_jk[i][0], data_jk[i][1], random_jk[i][0], random_jk[i][1]) for i in range(len(jk_indexes))])
         w_jk = np.array(w_jk)
+
         np.save(f'/user/animesh.sah/w_theta_results/corrfunc_{part}_{error}_patches_nside_{nside}_{len(jk_indexes)}_{min_sep}_to_{max_sep}_v2.npy', w_jk)
     elif error == 'bootstrap':
-        num_bootstrap = 2000
+        num_bootstrap = 200
         autocorr=1 
+
         bins = np.logspace(np.log10(min_sep), np.log10(max_sep), nbins+1 )
 
         RR_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_random, DEC_random)
@@ -323,11 +381,15 @@ if error!= 'none' and method == 'corrfunc':
 
 
 elif method=='treecorr' and error!='none': 
-    npatch=100
+    npatch=30
 
     if error=='jackknife':
-        cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg',npatch=npatch)
-        cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, ra_units='deg', dec_units='deg',patch_centers=cat_rand.patch_centers)
+        if WGT:
+            cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, w=random_weights, ra_units='deg', dec_units='deg',npatch=npatch)
+            cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, w=data_weights, ra_units='deg', dec_units='deg', patch_centers=cat_rand.patch_centers)
+        else:
+            cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg',npatch=npatch)
+            cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, ra_units='deg', dec_units='deg',patch_centers=cat_rand.patch_centers)
         cat_rand.write_patch_centers('patch_centers.txt')
         print('Starting Jackknife error estimation')
         rr =  treecorr.NNCorrelation(min_sep=min_sep, max_sep=max_sep, nbins=nbins ,sep_units='deg' ,  bin_type='Log'  , var_method='jackknife',cross_patch_weight='match')
@@ -341,23 +403,62 @@ elif method=='treecorr' and error!='none':
         xi, varxi = dd.calculateXi(rr=rr, dr=dr)
         sig = np.sqrt(varxi)
         print('sigma',sig)
+        np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{npatch}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([dd.meanr,xi,sig]))
+
+        
 
     elif error =='bootstrap':
-        cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg',npatch=100)
-        cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, ra_units='deg', dec_units='deg',patch_centers=cat_rand.patch_centers)
-        print('Starting Bootstrap error estimation')
-        rr =  treecorr.NNCorrelation(min_sep=min_sep, max_sep=max_sep, nbins=nbins ,sep_units='deg' ,  bin_type='Log'  , var_method='bootstrap',num_bootstrap=5000,cross_patch_weight='geom')
-        dd = treecorr.NNCorrelation(min_sep=min_sep, max_sep=max_sep, nbins=nbins ,sep_units='deg'  ,  bin_type='Log'  , var_method='bootstrap',num_bootstrap=5000,cross_patch_weight='geom')# bins are spaced evenly in log10(sep)
-        dr =  treecorr.NNCorrelation(min_sep=min_sep, max_sep=max_sep, nbins=nbins ,sep_units='deg' ,  bin_type='Log'  , var_method='bootstrap',num_bootstrap=5000,cross_patch_weight='geom')
-        dd.process(cat_data,num_threads=nthreads)
-        dr.process(cat_data, cat_rand,num_threads=nthreads)
-        rr.process(cat_rand,num_threads=nthreads)
-        xi, varxi = dd.calculateXi(rr=rr, dr=dr)
-        sig = np.sqrt(varxi)
-        print('sigma',sig)
-    np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{npatch}_{min_sep}_to_{max_sep}.npy', np.vstack([dd.meanr,xi,sig]))
+        
+        N_bootstrap=1000
+        import concurrent.futures
+        def run_treecorr_bootstrap(n_patch):
+            if WGT:
+                cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, w=random_weights, ra_units='deg', dec_units='deg', npatch=n_patch)
+                cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, w=data_weights, ra_units='deg', dec_units='deg', patch_centers=cat_rand.patch_centers)
+            else:
+                cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg', npatch=n_patch)
+                cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, ra_units='deg', dec_units='deg', patch_centers=cat_rand.patch_centers)
+            rr = treecorr.NNCorrelation(min_sep=min_sep, max_sep=max_sep, nbins=nbins, sep_units='deg', bin_type='Log', var_method='bootstrap', num_bootstrap=N_bootstrap, cross_patch_weight='geom')
+            dd = treecorr.NNCorrelation(min_sep=min_sep, max_sep=max_sep, nbins=nbins, sep_units='deg', bin_type='Log', var_method='bootstrap', num_bootstrap=N_bootstrap, cross_patch_weight='geom')
+            dr = treecorr.NNCorrelation(min_sep=min_sep, max_sep=max_sep, nbins=nbins, sep_units='deg', bin_type='Log', var_method='bootstrap', num_bootstrap=N_bootstrap, cross_patch_weight='geom')
+            dd.process(cat_data, num_threads=nthreads)
+            dr.process(cat_data, cat_rand, num_threads=nthreads)
+            rr.process(cat_rand, num_threads=nthreads)
+            xi, varxi = dd.calculateXi(rr=rr, dr=dr)
+            sig = np.sqrt(varxi)
+            print(f'n_patch={n_patch}, sigma={sig}')
+            return n_patch, dd.meanr, xi, sig
+        if args.multiple_patch:
 
 
+
+            n_patch_list = [100]
+            results = []
+            with concurrent.futures.ProcessPoolExecutor() as executor:
+                futures = [executor.submit(run_treecorr_bootstrap, n_patch) for n_patch in n_patch_list]
+                for future in concurrent.futures.as_completed(futures):
+                    n_patch, meanr, xi, sig = future.result()
+                    results.append((n_patch, meanr, xi, sig))
+
+            # Optionally, sort results by n_patch
+            results.sort(key=lambda x: x[0])
+            # Save each result separately or as a combined array as needed
+            for n_patch, meanr, xi, sig in results:
+                np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{n_patch}_{N_bootstrap}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([meanr, xi, sig]))   
+        else:
+            n_patch  = 50 
+            _,dd_meanr,xi,sig = run_treecorr_bootstrap(n_patch)
+
+                                        
+            np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{npatch}_{N_bootstrap}_{N_bootstrap}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([dd.meanr,xi,sig]))
+    
+
+
+b =time.time()
+elapsed = b - a
+minutes = int(elapsed // 60)
+seconds = int(elapsed % 60)
+print(f"Total time taken: {minutes} min {seconds} sec")
 
 
         
