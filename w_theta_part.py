@@ -43,21 +43,27 @@ parser.add_argument('--nside_weight', type=int, default=64,
                     help='nside used for  healpix weights')
 parser.add_argument('--multiple_patch', action='store_true',default=False,
                     help='If true, runs for multiple patch numbers (only for treecorr with jackknife or bootstrap)')
+parser.add_argument('--kind', type=str, choices=['equal_10','equal_5','partial_percentile','full_sample'], default=None,)
+parser.add_argument('--suffix',type=str, default='',help='suffix for the output file name (only for treecorr with jackknife or bootstrap)')
 args = parser.parse_args()
 part = args.part
 method = args.method
 error = args.error
 WGT = args.add_weights
 nside_weight = args.nside_weight
+
+if args.kind != None and not WGT:
+    import sys 
+    sys.exit('Error: --kind option can only be used if --add_weights is set to True')
 if part=='full':
     table_selection = Table(fitsio.FITS('table_match_final.fits')[1].read())
 else:
     if part == 'north':
         #table_selection = Table(fitsio.FITS('/user/animesh.sah/FP_CUTS/north_cuts_v9.fits')[1].read())
         table_selection = Table(fitsio.FITS(f'../FP_CUTS/table_{part}_unique.fits')[1].read())
-
     else:
         table_selection = Table(fitsio.FITS(f'../FP_CUTS/table_{part}_unique.fits')[1].read())
+        #table_selection =  Table(fitsio.FITS('/user/animesh.sah/FP_CUTS/table_south_degraded_unique.fits')[1].read())
 
 if part=='north':
     table_selection = table_selection[table_selection['DEC']>=32.375]
@@ -72,6 +78,8 @@ if args.sample=='BGS':
     elif part == 'south':
         table_selection  = Table(fitsio.FITS('/user/animesh.sah/DESI_PECVEL/TABLE_legacy_south_v1_sep_1_all_features.fits')[1].read())
 
+
+#table_selection = table_selection[table_selection['MAG_R']<17]
 RA_data,DEC_data = table_selection['RA'], table_selection['DEC']
 randoms = Table(fitsio.FITS('/user/animesh.sah/FP_CUTS/randoms_5M.fits')[1].read())
 if part=='north':
@@ -97,10 +105,10 @@ DEC_random= np.ascontiguousarray(np.array(DEC_random, dtype=np.float64))
 
 
 
-nbins = 50
+nbins = 200
 nthreads=192
 min_sep = 0.01  # degrees,
-max_sep = 15   # degrees
+max_sep = 10   # degrees
 N = len(RA_data)
 rand_N = len(RA_random)
 print('Theta value ranging from',min_sep,'to',max_sep,'in',nbins,'bins')
@@ -122,14 +130,45 @@ if WGT:
     print('Adding weights to the calculation')
     print('Nside for weights is:',nside_weight)
 
-    weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/{part}_combined_systematic_weights_nside{nside_weight}.fits')
-    if part=='south':
-        weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/south_CSFD_systematic_weights_nside64.fits')
-    data_ipix = coords_to_pix(RA_data, DEC_data, nside_weight)
-    random_ipix = coords_to_pix(RA_random, DEC_random, nside_weight)
-    data_weights = weight_file[data_ipix]
-    random_weights = weight_file[random_ipix]
+    if part == 'full':
+        print('Full sample: Applying north and south weights separately')
+        weight_file_north = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/systematic_weights/north_multilinear_systematic_weights_nside64_partial_percentile.fits')
+        weight_file_south = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/systematic_weights/south_multilinear_systematic_weights_nside64_partial_percentile.fits')
+        north_mask_data = DEC_data >= 32.375
+        south_mask_data = DEC_data < 32.375
+        data_weights = np.empty(len(RA_data), dtype=np.float64)
+        data_weights[north_mask_data] = weight_file_north[coords_to_pix(RA_data[north_mask_data], DEC_data[north_mask_data], nside_weight)]
+        data_weights[south_mask_data] = weight_file_south[coords_to_pix(RA_data[south_mask_data], DEC_data[south_mask_data], nside_weight)]
 
+        print('Mean of data weights:',np.mean(data_weights))
+        data_weights = np.empty(len(RA_data), dtype=np.float64)
+        data_weights[north_mask_data] = weight_file_north[coords_to_pix(RA_data[north_mask_data], DEC_data[north_mask_data], nside_weight)]
+        data_weights[south_mask_data] = weight_file_south[coords_to_pix(RA_data[south_mask_data], DEC_data[south_mask_data], nside_weight)]
+        print('Mean of data weights:',np.mean(data_weights))
+
+        north_mask_rand = DEC_random >= 32.375
+        south_mask_rand = DEC_random < 32.375
+        rand_weights = np.empty(len(RA_random), dtype=np.float64)
+        rand_weights[north_mask_rand] = weight_file_north[coords_to_pix(RA_random[north_mask_rand], DEC_random[north_mask_rand], nside_weight)]
+        rand_weights[south_mask_rand] = weight_file_south[coords_to_pix(RA_random[south_mask_rand], DEC_random[south_mask_rand], nside_weight)]
+    else:
+
+        weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/systematic_weights/{part}_multilinear_systematic_weights_nside64_full_sample.fits')
+
+        if part=='south':
+            # weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/south_CSFD_systematic_weights_nside64.fits')
+            weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/systematic_weights/South_multilinear_systematic_weights_nside64.fits')
+        elif part=='north':
+            #weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/north_CSFD_systematic_weights_nside64.fits')
+            weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/systematic_weights/North_multilinear_systematic_weights_nside64.fits')
+        if args.kind is not None:
+            weight_file = hp.read_map(f'/user/animesh.sah/DESI_PECVEL/systematic_weights/{part}_multilinear_systematic_weights_nside64_{args.kind}.fits')
+
+        data_ipix = coords_to_pix(RA_data, DEC_data, nside_weight)
+        data_weights = weight_file[data_ipix]
+        rand_weights = weight_file[coords_to_pix(RA_random, DEC_random, nside_weight)]
+        
+ 
 
 # def w_theta_corrfunc(ra_data,dec_data,ra_random,dec_random,min_sep=0.001,max_sep=100,nbins=0,nthreads=120):
 #     bins = np.logspace(np.log10(min_sep), np.log10(max_sep), nbins+1 )
@@ -164,11 +203,21 @@ def w_theta_corrfunc(ra_data,dec_data,ra_random,dec_random,min_sep=min_sep,max_s
     
 
 
+def w_theta_brute(DD,RR,DR,ND,NR,met='treecorr'): 
+    DD_norm = 2*DD/(ND*(ND-1))
+    RR_norm = 2*RR/(NR*(NR-1))
+    DR_norm = DR/(ND*NR)
+    if met == 'corrfunc':  #Corrfunc does double counting for autocorrelation, so we need to adjust the normalization
+        DD_norm = DD/(ND*(ND-1))
+        RR_norm = RR/(NR*(NR-1))
 
+    
+    wtheta = (DD_norm - 2*DR_norm + RR_norm)/RR_norm
+    return wtheta
 
 if method=='treecorr' and error=='none':
     if WGT:
-        cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, w=random_weights, ra_units='deg', dec_units='deg')
+        cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg')
         cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, w=data_weights, ra_units='deg', dec_units='deg')
     else:
         cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg')
@@ -194,7 +243,7 @@ if method=='treecorr' and error=='none':
     #print(dd.meanr - dr.meanr)
     #print(dd.meanlogr)
     if args.sample=='FP':
-        np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([dd.meanr,xi,sig]))
+        np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}.npy', np.vstack([dd.meanr,xi,sig]))
     else:
         np.save(f'/user/animesh.sah/w_theta_results/treecorr_DR1cross_matched_{part}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([dd.meanr,xi,sig]))
 
@@ -208,15 +257,27 @@ elif method=='corrfunc' and error=='none':
     print('Length of data is',N)
     print('Length of Random is',rand_N)
     print("Ratio is:",rand_N/N)
-    DD_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_data, DEC_data)
-    autocorr=0
-    print('Done with DD counts')
-    DR_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_data, DEC_data,RA2=RA_random, DEC2=DEC_random)
-    autocorr=1
-    RR_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_random,DEC_random)
-    wtheta = convert_3d_counts_to_cf(RA_data.size, RA_data.size, RA_random.size, RA_random.size, DD_counts, DR_counts,DR_counts, RR_counts)
-    print('W_theta',wtheta)
-    np.save(f'/user/animesh.sah/w_theta_results/corrfunc_{part}_{min_sep}_to_{max_sep}.npy', np.vstack([(bins[1:]+bins[:-1])/2,wtheta]))
+
+    if WGT: 
+            DD_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_data, DEC_data,weights1 = data_weights,weights2 = data_weights,weight_type='pair_product')
+            autocorr=0
+            print('Done with DD counts')
+            DR_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_data, DEC_data,RA2=RA_random, DEC2=DEC_random,weights1=data_weights, weight_type='pair_product')
+            autocorr=1
+            RR_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_random,DEC_random)
+            #wtheta = convert_3d_counts_to_cf(RA_data.size, RA_data.size, RA_random.size, RA_random.size, DD_counts, DR_counts,DR_counts, RR_counts)
+            wtheta = w_theta_brute(DD_counts['weightavg']*DD_counts['npairs'],RR_counts['npairs'],DR_counts['weightavg']*DR_counts['npairs'],len(RA_data),len(RA_random),met='corrfunc')
+            print('W_theta',wtheta)
+    else:
+            DD_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_data, DEC_data)
+            autocorr=0
+            print('Done with DD counts')
+            DR_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_data, DEC_data,RA2=RA_random, DEC2=DEC_random)
+            autocorr=1
+            RR_counts = DDtheta_mocks(autocorr, nthreads, bins,RA_random,DEC_random)
+            wtheta = convert_3d_counts_to_cf(RA_data.size, RA_data.size, RA_random.size, RA_random.size, DD_counts, DR_counts,DR_counts, RR_counts)
+            print('W_theta',wtheta)
+    np.save(f'/user/animesh.sah/w_theta_results/corrfunc_{part}_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}.npy', np.vstack([(bins[1:]+bins[:-1])/2,wtheta]))
 
 def hist_pix(ra,dec,nside=6):
     npix = hp.nside2npix(nside)
@@ -385,7 +446,7 @@ elif method=='treecorr' and error!='none':
 
     if error=='jackknife':
         if WGT:
-            cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, w=random_weights, ra_units='deg', dec_units='deg',npatch=npatch)
+            cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg',npatch=npatch)
             cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, w=data_weights, ra_units='deg', dec_units='deg', patch_centers=cat_rand.patch_centers)
         else:
             cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg',npatch=npatch)
@@ -403,7 +464,7 @@ elif method=='treecorr' and error!='none':
         xi, varxi = dd.calculateXi(rr=rr, dr=dr)
         sig = np.sqrt(varxi)
         print('sigma',sig)
-        np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{npatch}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([dd.meanr,xi,sig]))
+        np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{npatch}_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}.npy', np.vstack([dd.meanr,xi,sig]))
 
         
 
@@ -413,7 +474,7 @@ elif method=='treecorr' and error!='none':
         import concurrent.futures
         def run_treecorr_bootstrap(n_patch):
             if WGT:
-                cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, w=random_weights, ra_units='deg', dec_units='deg', npatch=n_patch)
+                cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg', npatch=n_patch)
                 cat_data = treecorr.Catalog(ra=RA_data, dec=DEC_data, w=data_weights, ra_units='deg', dec_units='deg', patch_centers=cat_rand.patch_centers)
             else:
                 cat_rand = treecorr.Catalog(ra=RA_random, dec=DEC_random, ra_units='deg', dec_units='deg', npatch=n_patch)
@@ -444,13 +505,13 @@ elif method=='treecorr' and error!='none':
             results.sort(key=lambda x: x[0])
             # Save each result separately or as a combined array as needed
             for n_patch, meanr, xi, sig in results:
-                np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{n_patch}_{N_bootstrap}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([meanr, xi, sig]))   
+                np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{n_patch}_{N_bootstrap}_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}.npy', np.vstack([meanr, xi, sig]))   
         else:
             n_patch  = 50 
             _,dd_meanr,xi,sig = run_treecorr_bootstrap(n_patch)
 
                                         
-            np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{npatch}_{N_bootstrap}_{N_bootstrap}_{min_sep}_to_{max_sep}_w_{WGT}.npy', np.vstack([dd.meanr,xi,sig]))
+            np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{npatch}_{N_bootstrap}_{N_bootstrap}_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}.npy', np.vstack([dd_meanr,xi,sig]))
     
 
 
