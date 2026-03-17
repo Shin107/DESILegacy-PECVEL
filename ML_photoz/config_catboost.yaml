@@ -1,0 +1,33 @@
+# config.yaml
+data:
+  region: "north"          # Options: "north", "south", "both"
+  dr1:
+    north: "/user/animesh.sah/DESI_PECVEL/TABLE_DR1_north_v1_sep_1_all_features.fits"
+    south: "/user/animesh.sah/DESI_PECVEL/TABLE_DR1_south_v1_sep_1_all_features.fits"
+  legacy:
+    north: "/user/animesh.sah/DESI_PECVEL/TABLE_legacy_north_v1_sep_1_all_features.fits"
+    south: "/user/animesh.sah/DESI_PECVEL/TABLE_legacy_south_v1_sep_1_all_features.fits"
+
+model:
+  iterations: 9000
+  depth: 7
+  learning_rate: 0.04
+  use_gpu: false
+  random_state: 8513
+  weight: null             # Options: "z_weight_FP", "weighted_sigmoid", null
+
+pipeline:
+  mode: "train"            # Options: "train", "continue", "evaluate"
+  model_path: null         # Required for "continue" and "evaluate" modes
+  plot: null               # Options: "2d_hist_valid", "2d_hist_test", "2d_hist_complete"
+  save_predictions: true
+
+features:
+  - MAG_R
+  - MAG_GR
+  - MAG_RZ
+  - MAG_W1W2
+  - MAG_ZW1
+  - SHAPE_R
+  - MODEL_WEIGHT
+  - BBA
