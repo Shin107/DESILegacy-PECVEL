@@ -14,18 +14,38 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 # Setup logging
 logging.basicConfig(level=logging.INFO)
+def add_file_logger(run_dir: Path):
+    """Add a file handler to the root logger"""
+    log_path = run_dir / 'logs' / 'pipeline.log'
+    fh = logging.FileHandler(log_path)
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+    logger.addHandler(fh)
+    logger.info(f"File logging started at {log_path}")
 logger = logging.getLogger(__name__)
+
+def setup_run_dir(run_dir: str) -> Path:
+    """Create run directory and all subdirectories"""
+    run_dir = Path(run_dir)
+    subdirs = ['models', 'plots', 'predictions', 'catboost_info', 'logs']
+    run_dir.mkdir(parents=True, exist_ok=True)
+    for sub in subdirs:
+        (run_dir / sub).mkdir(exist_ok=True)
+    logger.info(f"Run directory set up at: {run_dir.resolve()}")
+    return run_dir
+    
+    
 import yaml
 class PhotoZCatBoostPipeline:
     """
     A complete pipeline for photometric redshift prediction using CatBoost
     """
     
-    def __init__(self, use_gpu=False, random_state=8513,region ='north'):
+    def __init__(self, use_gpu=False, random_state=8513,region ='north',run_dir='run',feature_names=None):
         self.use_gpu = use_gpu
         self.random_state = random_state
         self.model = None
-        self.feature_names = None
+        self.feature_names = feature_names
         self.X_train = None
         self.X_val = None
         self.X_test = None
@@ -35,6 +55,7 @@ class PhotoZCatBoostPipeline:
         self.X = None
         self.y = None
         self.region_tag = region
+        self.run_dir =Path(run_dir)
         
         logger.info(f"Initialized PhotoZ pipeline using {'GPU' if use_gpu else 'CPU'}")
         logger.info(f"Number of CPUs available: {multiprocessing.cpu_count()}")
@@ -215,10 +236,11 @@ class PhotoZCatBoostPipeline:
         
         return legacy
     
-    def filter_data(self, legacy, DR1,feature_names=None):
+    def filter_data(self, legacy, DR1,feature_names=None,return_all_columns=False):
         """Apply quality cuts and filtering to the data"""
         logger.info("Applying data quality cuts...")
-        
+        legacy_copy = legacy.copy()
+        DR1_copy = DR1.copy()
         # Flux detection cuts
         if feature_names is None:
             #feature_names = ['MAG_GR', 'MAG_G', 'MAG_RZ', 'MAG_R', 'MAG_RW1', 'MAG_ZW1', 'MAG_W1W2']
@@ -255,8 +277,11 @@ class PhotoZCatBoostPipeline:
 
         legacy_final=legacy[combined_mask][indeces]
         logger.info(f"Filtered from {len(legacy)} to {len(legacy_final)} objects for unique TARGETID")
+        if not return_all_columns:
+            return legacy_final, DR1_final
+        else:
+            return legacy_copy[combined_mask], DR1_copy[combined_mask]
 
-        return legacy_final, DR1_final
 
     def prepare_ml_data(self, legacy_filtered, DR1_filtered):
         """Prepare machine learning dataset"""
@@ -268,12 +293,12 @@ class PhotoZCatBoostPipeline:
         logger.info(f"Feature matrix shape: {X.shape}")
         logger.info(f"Target range: [{y.min():.3f}, {y.max():.3f}]")
         self.X, self.y = X, y
-        nan_feature = np.any(np.isnan(X),axis =0)
-        nan_counts = np.isnan(X).sum(axis=0)
-        mask = nan_counts > 0
-        if np.any(nan_feature):
+        # nan_feature = np.any(np.isnan(X),axis =0)
+        # nan_counts = np.isnan(X).sum(axis=0)
+        # mask = nan_counts > 0
+        # if np.any(nan_feature):
 
-            logger.info(f'Caution feature: {self.feature_names[nan_feature]} has nan values. Counts: {nan_counts[mask]}')
+        #     logger.info(f'Caution feature: {self.feature_names[nan_feature]} has nan values. Counts: {nan_counts[mask]}')
 
         return X, y
 
@@ -283,7 +308,7 @@ class PhotoZCatBoostPipeline:
         
         # First split: 70% train, 30% temp
         X_train, X_temp, y_train, y_temp = train_test_split(
-            X, y, test_size=0.25, random_state=self.random_state
+            X, y, test_size=0.20, random_state=self.random_state
         )
         
         # Second split: 15% validation, 15% test
@@ -299,7 +324,7 @@ class PhotoZCatBoostPipeline:
         
         return X_train, X_val, X_test, y_train, y_val, y_test
 
-    def train_new_model(self, iterations=5000, depth=6, learning_rate=0.01,weight=None):
+    def train_new_model(self, iterations=5000, depth=6, learning_rate=0.01,weight=None,train_dir=None):
         """Train a fresh model from scratch"""
         logger.info("Training new CatBoost model......")
         if weight == 'z_weight_FP':
@@ -318,11 +343,12 @@ class PhotoZCatBoostPipeline:
             custom_metric=['MAE','R2'],
             task_type="GPU" if self.use_gpu else "CPU",
             random_seed=self.random_state,
-            verbose=200,
+            verbose=200, train_dir= train_dir
             #weights = weights if weight != None else None
         )
         
         # Create pools
+        train_dir = train_dir or str(self.run_dir/'catboost_info')
         logger.info("Using weights for training" if weight != None else "No weights used for training")
         # self.X_train = self.X_train.astype(np.float32)
         # self.y_train = self.y_train.astype(np.float32)
@@ -464,10 +490,11 @@ class PhotoZCatBoostPipeline:
         
         if save_predictions:
             # Save predictions for further analysis
-            np.savez(f'predictions_{self.region_tag}.npz',
+            out_path = self.run_dir / 'predictions' / f'predictions_{self.region_tag}.npz'
+            np.savez(out_path,
                     y_test=self.y_test, y_pred_test=y_pred_test,
                     y_val=self.y_val, y_pred_val=y_pred_val)
-            logger.info("Predictions saved to predictions.npz")
+            logger.info(f"Predictions saved to {out_path}")
         
         return results
 
@@ -508,19 +535,19 @@ class PhotoZCatBoostPipeline:
 
     def save_model(self, filename):
         """Save the trained model"""
+        path = self.run_dir/'models'/filename
+
         if self.model is None:
             raise ValueError("No model to save. Train a model first.")
         
         # Add timestamp if filename exists
-        path = Path(filename)
         if path.exists():
             timestamp = int(time.time())
-            stem, suffix = path.stem, path.suffix
-            filename = f"{stem}_{timestamp}{suffix}"
+            path = self.run_dir / 'models' / f"{path.stem}_{timestamp}{path.suffix}"
         
-        self.model.save_model(filename)
-        logger.info(f"Model saved to {filename}")
-        return filename
+        self.model.save_model(str(path))
+        logger.info(f"Model saved to {path}")
+        return str(path)
 
     def run_complete_pipeline(self, model_config=None):
         """Run the complete pipeline from data loading to evaluation"""
@@ -557,11 +584,11 @@ class PhotoZCatBoostPipeline:
         hist, xedges, yedges = np.histogram2d(x, y, bins=[binx, biny])
         return hist, xedges, yedges
 
-    def plot_2d_hist_validation(self, bins=50, save_path=f'catboost_2d_hist_valid.png'):
+    def plot_2d_hist_validation(self, bins=50):
         """Plot 2D histogram"""
         x = self.y_val
         y = self.model.predict(self.X_val)
-
+        save_path = self.run_dir / 'plots' / f'2d_hist_valid_{self.region_tag}.png'
         hist, xedges, yedges = self.two_d_hist(x, y, bins=bins)
         plt.figure(figsize=(8, 6))
         plt.imshow(hist.T, origin='lower', aspect='auto',
@@ -575,10 +602,11 @@ class PhotoZCatBoostPipeline:
         if save_path:
             plt.savefig(save_path)
             logger.info(f"2D histogram saved to {save_path}")
-    def plot_2d_hist_test(self, bins=50, save_path=f'catboost_2d_hist_test.png'):
+    def plot_2d_hist_test(self, bins=50):
         """Plot 2D histogram"""
         x = self.y_test
         y = self.model.predict(self.X_test)
+        save_path = self.run_dir / 'plots' / f'2d_hist_test_{self.region_tag}.png'
 
         hist, xedges, yedges = self.two_d_hist(x, y, bins=bins)
         plt.figure(figsize=(8, 6))
@@ -593,11 +621,11 @@ class PhotoZCatBoostPipeline:
         if save_path:
             plt.savefig(save_path)
             logger.info(f"2D histogram saved to {save_path}")
-    def plot_2d_hist_complete(self, bins=50, save_path=f'catboost_2d_hist_complete.png'):
+    def plot_2d_hist_complete(self, bins=50):
         """Plot 2D histogram"""
         x = self.y
         y = self.model.predict(self.X)
-
+        save_path = self.run_dir / 'plots' / f'2d_hist_complete_{self.region_tag}.png'
 
 
         hist, xedges, yedges = self.two_d_hist(x, y, bins=bins)
@@ -616,11 +644,47 @@ class PhotoZCatBoostPipeline:
     
     
     
+    def plot_feature_importance(self, model_path=None):
+        if model_path is None:
+            raise ValueError("No model found. Train or load a model first.")
 
+        model = CatBoostRegressor()
+        model.load_model(model_path)
+        save_path = self.run_dir / 'plots' / f'feature_importance_{self.region_tag}.png'
 
+        cat_idx = [self.feature_names.index('TYPE')] if 'TYPE' in self.feature_names else None
 
-    
-    
+        # Sample to avoid memory explosion
+        idx = np.random.choice(len(self.X_test), size=min(60000, len(self.X_test)), replace=False)
+        sample_pool = Pool(self.X_test[idx], self.y_test[idx], cat_features=cat_idx)
+
+        # SHAP values
+        shap_values = model.get_feature_importance(type='ShapValues', data=sample_pool) #SHapley Additive exPlanations 
+        shap_values = shap_values[:, :-1]
+        shap_importance = np.mean(np.abs(shap_values), axis=0)
+
+        # Loss importance
+        loss_importance = model.get_feature_importance(type='LossFunctionChange', data=sample_pool) #change in the loss function if a particular feature is removed
+
+        feature_names = self.feature_names
+
+        plt.figure(figsize=(12, 6))
+
+        plt.subplot(1, 2, 1)
+        plt.barh(feature_names, shap_importance)
+        plt.title('SHAP Importance')
+
+        plt.subplot(1, 2, 2)
+        plt.barh(feature_names, loss_importance)
+        plt.title('Loss Function Change')
+
+        plt.tight_layout()
+        plt.savefig(save_path)    
+
+        
+
+            
+
     
 
 
@@ -629,7 +693,8 @@ def main():
     parser = argparse.ArgumentParser(description="CatBoost PhotoZ Pipeline")
     parser.add_argument("--config", type=str, required=True,
                         help="Path to YAML config file")
-
+    parser.add_argument("--run_dir",    type=str, required=True,   # <-- new
+                        help="Directory to save all outputs")
     parser.add_argument("--region",   type=str,  default=None)
     parser.add_argument("--mode",     type=str,  default=None)
     parser.add_argument("--gpu",      action="store_true")
@@ -647,12 +712,17 @@ def main():
     if args.model_path: cfg['pipeline']['model_path']  = args.model_path
     if args.plot:       cfg['pipeline']['plot']        = args.plot
     # Initialize pipeline
-
+    run_dir = setup_run_dir(args.run_dir)
+    add_file_logger(run_dir)
+    import shutil
+    shutil.copy(args.config, run_dir / 'logs' / 'config_used.yaml')
     region =  cfg['data']['region']
     pipeline = PhotoZCatBoostPipeline(
         use_gpu=cfg['model']['use_gpu'],
-        random_state=cfg['model']['random_state'],region = cfg['data']['region']
+        random_state=cfg['model']['random_state'],region = cfg['data']['region'],run_dir=run_dir,feature_names=cfg['features']
     )    
+
+
     # Load and prepare data (always needed)
     DR1, legacy = pipeline.load_astronomical_data(cfg)
     legacy = pipeline.compute_magnitudes(legacy)
@@ -664,12 +734,15 @@ def main():
     model_path = cfg['pipeline'].get('model_path')
     mcfg       = cfg['model']
     # Execute based on mode
+
+
+    
     if mode == 'train':
         pipeline.train_new_model(
             iterations=mcfg['iterations'],
             depth=mcfg['depth'],
             learning_rate=mcfg['learning_rate'],
-            weight=mcfg.get('weight')
+            weight=mcfg.get('weight'),train_dir = mcfg.get('train_dir')
         )
         pipeline.evaluate_model(save_predictions=cfg['pipeline']['save_predictions'])
         out_name = model_path or f"catboost_{region}_{mcfg.get('weight') or 'noweight'}.cbm"
@@ -692,6 +765,11 @@ def main():
         if plot == '2d_hist_valid':    pipeline.plot_2d_hist_validation()
         elif plot == '2d_hist_test':   pipeline.plot_2d_hist_test()
         elif plot == '2d_hist_complete': pipeline.plot_2d_hist_complete()
+    elif mode == 'plot':
+        if not model_path:
+            raise ValueError("model_path required for 'plot' mode")
+        pipeline.load_pretrained_model(model_path)
+        pipeline.plot_feature_importance(model_path)
 
 
 if __name__ == "__main__":
