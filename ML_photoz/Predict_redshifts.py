@@ -329,7 +329,12 @@ def main():
     
     matched_north = data_instance._add_features(matched_north)
     matched_north_filtered, DR1_north_filtered = data_instance.filter_data(matched_north, matched_DR_north, feature_names = cfg['features'],return_all_columns=True)
-    print(matched_north_filtered.colnames)
+
+    matched_south = data_instance.compute_magnitudes(matched_south)
+    
+    matched_south = data_instance._add_features(matched_south)
+    matched_south_filtered, DR1_south_filtered = data_instance.filter_data(matched_south, matched_DR_south, feature_names = cfg['features'],return_all_columns=True)
+    print(matched_south_filtered.colnames)
     # DR1, legacy = pipeline.load_astronomical_data(cfg)
     # legacy = pipeline.compute_magnitudes(legacy)
     # legacy = pipeline._add_features(legacy)
@@ -337,7 +342,7 @@ def main():
     # ── Run perturbation loop ──
     results, all_preds = predict_with_uncertainty_parallel(
     model_path=args.model_path,
-    legacy_clean=matched_north_filtered,
+    legacy_clean=matched_south_filtered,
     feature_names=cfg['features'],
     n_perturbations=args.n_perturbations,
     seed=args.seed,
@@ -352,7 +357,7 @@ def main():
     print(f"  Avg 95% CI width: {(results['u95']-results['l95']).mean():.4f}")
 
     # ── Save ──
-    save_results(results, all_preds, matched_north_filtered , cfg, out_path)
+    save_results(results, all_preds, matched_south_filtered , cfg, out_path)
 
 
 if __name__ == "__main__":
