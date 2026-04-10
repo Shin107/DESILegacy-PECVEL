@@ -8,7 +8,7 @@ import argparse
 import time
 import logging
 from pathlib import Path
-from Metrics import PhotoZMetrics  # Your custom metrics class
+from Metrics import PhotoZMetrics, SigmaNMAD  # Your custom metrics class
 import multiprocessing
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
@@ -235,8 +235,27 @@ class PhotoZCatBoostPipeline:
 
         
         return legacy
+    def filter_photometric_data(self, legacy,return_all_columns=False):
+        """Apply photometric quality cuts to the data"""
+        logger.info("Applying photometric quality cuts...")
+        
+        # Example cuts (these can be adjusted based on data characteristics)
+        mask = (
+            (legacy['FLUX_G'] > 0) &
+            (legacy['FLUX_R'] > 0) &
+            (legacy['FLUX_Z'] > 0) &
+            (legacy['FLUX_W1'] > 0) &
+            (legacy['FLUX_W2'] > 0) &
+            (legacy['FLUX_W3'] > 0)
+        )
+        self.feature_names = feature_names
+
+        filtered_legacy = legacy[mask]
+        logger.info(f"Filtered from {len(legacy)} to {len(filtered_legacy)} objects based on photometric cuts")
+        
+        return filtered_legacy
     
-    def filter_data(self, legacy, DR1,feature_names=None,return_all_columns=False):
+    def filter_data(self, legacy, DR1,feature_names=None,return_all_columns=False,phot_only=False,diagnostics=False,keep_nan_vals = True):
         """Apply quality cuts and filtering to the data"""
         logger.info("Applying data quality cuts...")
         legacy_copy = legacy.copy()
@@ -264,11 +283,29 @@ class PhotoZCatBoostPipeline:
         numeric_cols = [c for c in legacy.colnames if np.issubdtype(legacy[c].dtype, np.number)]
         data = np.vstack([legacy[c] for c in numeric_cols]).T
         mask2 = np.isfinite(data).all(axis=1)
-        
+        # if diagnostics:
+        #     logger.info(f"Objects with 0 flux G:{}, R:{}, Z:{}: {}".format(
+        #         np.sum(legacy['FLUX_G'] == 0),
+        #         np.sum(legacy['FLUX_R'] == 0),
+        #         np.sum(legacy['FLUX_Z'] == 0),
+        #         np.sum(mask1)
+        #     ))
+        #     logger.info(f"Objects with non-finite values in features: {np.sum(~mask2)}")
+        if phot_only:
+            combined_mask = mask1 & mask2
+            logger.info(f"Filtered from {len(legacy)} to {np.sum(combined_mask)} objects based on photometric cuts only")
+            if not return_all_columns:
+                return legacy[combined_mask]
+            else:
+                return legacy_copy[combined_mask]
         # Valid redshift cuts - FIXED: added upper limit
+        if diagnostics:
+            logger.info(f"Objects with non-finite or non-positive redshifts: {np.sum(~(np.isfinite(DR1['Z']) & (DR1['Z'] > 0)))}")
         mask3 = np.isfinite(DR1['Z']) & (DR1['Z'] > 0)
-        
-        combined_mask = mask1 & mask2 & mask3
+        if keep_nan_vals:
+            combined_mask = mask1  & mask3
+        else: 
+            combined_mask = mask1 & mask2 & mask3
         logger.info(f"Filtered from {len(legacy)} to {np.sum(combined_mask)} objects")
         
         DR1_final=DR1[combined_mask]
@@ -283,7 +320,7 @@ class PhotoZCatBoostPipeline:
             return legacy_copy[combined_mask], DR1_copy[combined_mask]
 
 
-    def prepare_ml_data(self, legacy_filtered, DR1_filtered):
+    def prepare_ml_data(self, legacy_filtered, DR1_filtered,return_phot_only = False):
         """Prepare machine learning dataset"""
         
         
@@ -299,8 +336,22 @@ class PhotoZCatBoostPipeline:
         # if np.any(nan_feature):
 
         #     logger.info(f'Caution feature: {self.feature_names[nan_feature]} has nan values. Counts: {nan_counts[mask]}')
-
         return X, y
+
+    def prepare_ml_data_phot_only(self, legacy_filtered, return_phot_only = False):
+        """Prepare machine learning dataset"""
+        
+        
+        X = legacy_filtered.to_pandas().to_numpy()
+        
+        
+        # nan_feature = np.any(np.isnan(X),axis =0)
+        # nan_counts = np.isnan(X).sum(axis=0)
+        # mask = nan_counts > 0
+        # if np.any(nan_feature):
+
+        #     logger.info(f'Caution feature: {self.feature_names[nan_feature]} has nan values. Counts: {nan_counts[mask]}')
+        return X
 
     def create_data_splits(self, X, y):
         """Create train/validation/test splits with consistent random states"""
@@ -339,7 +390,7 @@ class PhotoZCatBoostPipeline:
             depth=depth,
             learning_rate=learning_rate,
             loss_function='RMSE',
-            eval_metric='RMSE',
+            eval_metric=SigmaNMAD(),
             custom_metric=['MAE','R2'],
             task_type="GPU" if self.use_gpu else "CPU",
             random_seed=self.random_state,
