@@ -1,6 +1,6 @@
 import numpy as np
 import os
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool, cpu_count, process
 import os
 import psutil
 import resource
@@ -8,7 +8,8 @@ import time
 from astropy.table import Table, hstack, vstack
 import fitsio
 import argparse
-
+process = psutil.Process(os.getpid())
+start_time = time.time()
 
 
 
@@ -17,11 +18,78 @@ parser.add_argument('-d', '--directory', choices=['north', 'south'], default='no
                     help='Which part to process (default: full)')
 parser.add_argument('-z', '--zeropoint_shift', type=float, default=0.0,
                     help='Zeropoint shift to apply to r band magnitudes (default: 0.0)')
-parser.add_argument('-c','--cuts',type = int, default=0,help='Number of cuts to apply ( default =0 , i.e all cuts =1 means apply only R band cut, 2 means R and G-R cut and so on till 4  )' )
+parser.add_argument('-c','--cuts',type = int, default=0,help='Number of cuts to apply ( default =0 , i.e all cuts, 1 means apply only R band cut, 2 means R and G-R cut and so on till 4 , 10=z cuts )' )
+
+parser.add_argument('-m', '--mode', choices=['default', 'cumulative', 'individual'], default='default',
+                    help=(
+                        'Cut mode:\n'
+                        '  default     : existing behaviour, one output table\n'
+                        '  cumulative  : 9 tables; table_i has cuts 1..i applied in sequence\n'
+                        '  individual  : 9 tables; table_i has only cut i applied alone'
+                    ))
 args = parser.parse_args()
 directory= args.directory
 zpt = args.zeropoint_shift
 cut_args = args.cuts
+mode = args.mode
+
+
+CUT_LABELS = [
+    'cut1_R_lt_18',
+    'cut2_GR_gt_068',
+    'cut3_slope1',
+    'cut4_slope2',
+    'cut5_Rcirc_gt_0',
+    'cut6_BBA_lt_07',
+    'cut7_sersic',
+    'cut8_Zmed_lt_015',
+    'cut9_ZL95_lt_01',
+]
+
+def _compute_mags_and_shapes(dr9_chunk, fits_path):
+    """Reusable helper: compute MAG, FIBERMAG, MAG_NOEXT, r_circ, bba."""
+    MAG, FIBERMAG, MAG_NOEXT = {}, {}, {}
+    for i in ['G', 'R', 'Z', 'W1']:
+        flux  = np.array(dr9_chunk[f'FLUX_{i}'])
+        trans = np.array(dr9_chunk[f'MW_TRANSMISSION_{i}'])
+        frac  = flux / trans
+        mag       = np.full_like(frac, np.nan)
+        mag_noext = np.full_like(frac, np.nan)
+        np.log10(flux, out=mag_noext, where=(frac > 0))
+        np.log10(frac, out=mag,       where=(frac > 0))
+        MAG[i]       = 22.5 - 2.5 * mag
+        MAG_NOEXT[i] = 22.5 - 2.5 * mag_noext
+    for i in ['G', 'R', 'Z']:
+        fiberflux  = np.array(dr9_chunk[f'FIBERFLUX_{i}'])
+        trans      = np.array(dr9_chunk[f'MW_TRANSMISSION_{i}'])
+        fracfiber  = fiberflux / trans
+        magfiber   = np.full_like(fracfiber, np.nan)
+        np.log10(fracfiber, out=magfiber, where=(fracfiber > 0))
+        FIBERMAG[i] = 22.5 - 2.5 * magfiber
+ 
+    if zpt != 0.0 and 'north' in fits_path:
+        MAG['R'] -= zpt
+        MAG['G'] -= zpt
+ 
+    e1, e2   = dr9_chunk['SHAPE_E1'], dr9_chunk['SHAPE_E2']
+    epsilon  = np.sqrt(e1**2 + e2**2)
+    bba      = (1 - epsilon) / (1 + epsilon)
+    r_circ   = np.sqrt(bba) * dr9_chunk['SHAPE_R']
+    return MAG, FIBERMAG, MAG_NOEXT, r_circ, bba
+ 
+
+
+
+def selector(MAG,r_circ,bba,dr9_chunk,dr9_chunk_pz):
+    return [MAG['R']<18,
+            (MAG['G'] - MAG['R']) > 0.68,
+            (MAG['G'] - MAG['R']) > (1.3 * (MAG['R'] - MAG['Z']) - 0.05),
+            (MAG['G'] - MAG['R']) < (2.0 * (MAG['R'] - MAG['Z']) - 0.15),
+            (r_circ > 0),
+            ((1 - bba) < 0.7),
+            (((dr9_chunk['TYPE'] == 'SER') & (dr9_chunk['SERSIC'] > 2.5)) | (dr9_chunk['TYPE'] == 'DEV')),
+            (dr9_chunk_pz['Z_PHOT_MEDIAN'] < 0.15),
+            (dr9_chunk_pz['Z_PHOT_L95'] < 0.1)]
 def process_file_pair(paths):
         fits_path, pz_path = paths
     
@@ -35,37 +103,7 @@ def process_file_pair(paths):
         dr9_chunk_pz = Table(fitsio.FITS(pz_path)[1].read(columns=cols2))
 
         # Compute magnitude
-        MAG = {}
-        FIBERMAG = {}
-        MAG_NOEXT={}
-        for i in ['G','R','Z','W1']:
-            flux = np.array(dr9_chunk[f'FLUX_{i}'])
-            #fiberflux= np.array(dr9_chunk[f'FIBERFLUX_{i}'])
-            trans = np.array(dr9_chunk[f'MW_TRANSMISSION_{i}'])
-            frac = flux / trans
-            mag = np.full_like(frac, np.nan)
-            mag_noext= np.full_like(frac, np.nan)
-            np.log10(flux, out=mag_noext, where=(frac > 0))
-            np.log10(frac, out=mag, where=(frac > 0))
-            #np.log10(fracfiber, out=magfiber, where=(fracfiber > 0))
-            MAG[i] = 22.5 - 2.5 * mag
-            MAG_NOEXT[i] = 22.5 - 2.5 * mag_noext
-        for i in ['G','R','Z']:
-            fiberflux= np.array(dr9_chunk[f'FIBERFLUX_{i}'])
-            trans = np.array(dr9_chunk[f'MW_TRANSMISSION_{i}'])
-            fracfiber= fiberflux /trans
-            magfiber = np.full_like(fracfiber, np.nan)
-            np.log10(fracfiber, out=magfiber, where=(fracfiber > 0))
-            FIBERMAG[i] = 22.5 - 2.5 * magfiber
-        if zpt != 0.0 and 'north' in fits_path:
-            MAG['R'] -= zpt  # Apply zeropoint shift to R band in north only
-            MAG['G']-= zpt
-            print(f"Applied zeropoint shift of {zpt} to R band in {fits_path}")
-        # Compute r_circ
-        e1, e2 = dr9_chunk['SHAPE_E1'], dr9_chunk['SHAPE_E2']
-        epsilon = np.sqrt(e1**2 + e2**2)
-        bba = (1 - epsilon) / (1 + epsilon)
-        r_circ = np.sqrt(bba) * dr9_chunk['SHAPE_R']
+        MAG, FIBERMAG, MAG_NOEXT, r_circ, bba = _compute_mags_and_shapes(dr9_chunk, fits_path)
         dr9_chunk['R_CIRC'] = r_circ
         dr9_chunk['MAG_G'] = MAG['G']
         dr9_chunk['MAG_R'] = MAG['R']
@@ -84,168 +122,78 @@ def process_file_pair(paths):
         initial_count = len(dr9_chunk)
         cut_counts = {}
 
-        # Cut 1: Basic MAG_R cut
-        cut1 = (MAG['R'] < 18)
-        cut_counts['R_mag'] = np.count_nonzero(cut1)
-      
-        # Cut 2: MAG_G - MAG_R color cut
-        cut2 = cut1 & ((MAG['G'] - MAG['R']) > 0.68)
-     
-        cut_counts['G-R > 0.68'] = np.count_nonzero(cut2)
-
-        # Cut 3: Sloped color cut 1
-        cut3 = cut2 & ((MAG['G'] - MAG['R']) > (1.3 * (MAG['R'] - MAG['Z']) - 0.05))
-        cut_counts['Slope1'] = np.count_nonzero(cut3)
-
-        # Cut 4: Sloped color cut 2
-        cut4 = cut3 & ((MAG['G'] - MAG['R']) < (2.0 * (MAG['R'] - MAG['Z']) - 0.15))
-        cut_counts['Slope2'] = np.count_nonzero(cut4)
-
-        # Cut 5: R_CIRC > 0
-        cut5 = cut4 & (r_circ > 0)
-        cut_counts['R_CIRC > 0'] = np.count_nonzero(cut5)
-
-        # Continue similarly...
-        # Example: combine all logical conditions as you already do
-        cut6 = cut5 & ((1 - bba) < 0.7)
-        cut_counts['BBA < 0.7'] = np.count_nonzero(cut6)
-        # Example: Sersic type and Sersic index cut
-        cut7 = cut6 & (((dr9_chunk['TYPE'] == 'SER') & (dr9_chunk['SERSIC'] > 2.5)) | (dr9_chunk['TYPE'] == 'DEV'))
-        cut_counts['Sersic type and index'] = np.count_nonzero(cut7)
-        # Example: Photo-z median and lower limit cuts
-        #dr9_chunk_pz = dr9_chunk_pz[cut7]  # Apply previous cuts to photo-z data
-
-        cut8 = cut7 & (dr9_chunk_pz['Z_PHOT_MEDIAN'] < 0.15)
-        cut_counts['Z_PHOT_MEDIAN < 0.15'] = np.count_nonzero(cut8)
-        cut9 = cut8&(dr9_chunk_pz['Z_PHOT_L95'] < 0.1)
-        
-        cut_counts['Z_PHOT_L95 < 0.1'] = np.count_nonzero(cut9)
-
-        
-
-        cuts = (
-            (MAG['R'] < 18) &
-            ((MAG['G'] - MAG['R']) > 0.68) &
-            ((MAG['G'] - MAG['R']) > (1.3 * (MAG['R'] - MAG['Z']) - 0.05)) &
-            ((MAG['G'] - MAG['R']) < (2.0 * (MAG['R'] - MAG['Z']) - 0.15)) &
-            (r_circ > 0) &
-            ((1 - bba) < 0.7) &
-            (((dr9_chunk['TYPE'] == 'SER') & (dr9_chunk['SERSIC'] > 2.5)) | (dr9_chunk['TYPE'] == 'DEV')) &
-            (dr9_chunk_pz['Z_PHOT_MEDIAN'] < 0.15) &
-            (dr9_chunk_pz['Z_PHOT_L95'] < 0.1)
-        )
-
-
-        result={}
-        
-
-        cut_counts['Final all cuts'] = np.count_nonzero(cuts)
-
-        # Now print individual and cumulative rejections
-        print(f"→ Initial: {initial_count}")
+        cuts_diag = selector(MAG,r_circ,bba,dr9_chunk,dr9_chunk_pz)
+        combined = np.ones(len(dr9_chunk), dtype=bool)
+        for label, cut in zip(CUT_LABELS, cuts_diag):
+            combined &= cut
+            cut_counts[label] = np.sum(combined)
+        print(f'Initial : {initial_count}' )
         prev = initial_count
         for label, count in cut_counts.items():
-            rejected = prev - count
-            print(f"{label:20s}: kept = {count}, rejected = {rejected}, cumulative loss = {initial_count - count}")
+            print(f"  {label:30s}: kept={count:7d}  rejected={prev-count:7d}  cumulative_loss={initial_count-count}")
             prev = count
-        mask = (
-        (dr9_chunk_pz['Z_PHOT_MEDIAN'] == -99) |
-        (dr9_chunk_pz['Z_PHOT_L95'] == -99) |
-        (dr9_chunk['FLUX_G'] == 0) |
-        (dr9_chunk['FLUX_R'] == 0) |
-        (dr9_chunk['FLUX_Z'] == 0))
+        total_num = len(dr9_chunk)
+        cuts_all = selector(MAG,r_circ,bba,dr9_chunk,dr9_chunk_pz)
         
-        total_num=len(dr9_chunk)
-        num_masked = np.sum(mask)
-        #dr9_chunk= dr9_chunk[~mask]
-        #dr9_chunk_pz = dr9_chunk_pz[~mask]
-        
-        MAG = {}
-        FIBERMAG = {}
-        MAG_NOEXT={}
-        for i in ['G','R','Z','W1']:
-            flux = np.array(dr9_chunk[f'FLUX_{i}'])
-            trans = np.array(dr9_chunk[f'MW_TRANSMISSION_{i}'])
-            frac = flux / trans
-            mag = np.full_like(frac, np.nan)
-            mag_noext= np.empty_like(frac)
-            np.log10(flux, out=mag_noext, where=(frac > 0))
-            np.log10(frac, out=mag, where=(frac > 0))
-            MAG[i] = 22.5 - 2.5 * mag
-            MAG_NOEXT[i] = 22.5 - 2.5 * mag_noext
-        if zpt != 0.0 and 'north' in fits_path:
-            MAG['R'] -= zpt  # Apply zeropoint shift to R band in north only
-            MAG['G']-= zpt
-            print(f"Applied zeropoint shift of {zpt} to R band in {fits_path}")
-        e1, e2 = dr9_chunk['SHAPE_E1'], dr9_chunk['SHAPE_E2']
-        epsilon = np.sqrt(e1**2 + e2**2)
-        bba = (1 - epsilon) / (1 + epsilon)
-        r_circ = np.sqrt(bba) * dr9_chunk['SHAPE_R']
-        dr9_chunk['R_CIRC'] = r_circ
-        dr9_chunk['MAG_G'] = MAG['G']
-        dr9_chunk['MAG_R'] = MAG['R']
-        dr9_chunk['MAG_Z'] = MAG['Z']
-        dr9_chunk['MAG_W1'] = MAG['W1']
-        dr9_chunk['MAG_NOEXT_G'] = MAG_NOEXT['G']
-        dr9_chunk['MAG_NOEXT_R'] = MAG_NOEXT['R']
-        dr9_chunk['MAG_NOEXT_Z'] = MAG_NOEXT['Z']
-
-
-        cut1 = (MAG['R'] < 18)
-        cut2 =  ((MAG['G'] - MAG['R']) > 0.68)
-        cut3 = ((MAG['G'] - MAG['R']) > (1.3 * (MAG['R'] - MAG['Z']) - 0.05))
-        cut4 =  ((MAG['G'] - MAG['R']) < (2.0 * (MAG['R'] - MAG['Z']) - 0.15))
-        cut5 =  (r_circ > 0)
-        cut6 = ((1 - bba) < 0.7)
-        cut7 =  (((dr9_chunk['TYPE'] == 'SER') & (dr9_chunk['SERSIC'] > 2.5)) | (dr9_chunk['TYPE'] == 'DEV'))
-        cut8 =   (dr9_chunk_pz['Z_PHOT_MEDIAN'] < 0.15)
-        cut9  = (dr9_chunk_pz['Z_PHOT_L95'] < 0.1)
-
-        cuts_all = [cut1, cut2, cut3, cut4, cut5, cut6, cut7, cut8, cut9]
-        num_cut1= np.count_nonzero(cut1)
-        num_cut2= np.count_nonzero(cut2)
-        num_cut3= np.count_nonzero(cut3)
-        num_cut4= np.count_nonzero(cut4)
-        num_cut5= np.count_nonzero(cut5)
-        num_cut6= np.count_nonzero(cut6)
-        num_cut7= np.count_nonzero(cut7)
-        num_cut8= np.count_nonzero(cut8)
-        num_cut9= np.count_nonzero(cut9)
-        k = np.array([num for num in [num_cut1, num_cut2, num_cut3, num_cut4, num_cut5, num_cut6, num_cut7, num_cut8, num_cut9]])
-
-
-        num_cum_cut1 = np.sum(cut1&cut2);num_cum_cut2 = np.sum(cut1&cut2&cut3);num_cum_cut3 = np.sum(cut1&cut2&cut3&cut4);num_cum_cut4 = np.sum(cut1&cut2&cut3&cut4&cut5);num_cum_cut5 = np.sum(cut1&cut2&cut3&cut4&cut5&cut6)
-        num_cum_cut6 = np.sum(cut1&cut2&cut3&cut4&cut5&cut6&cut7)
-        num_cum_cut7 = np.sum(cut1&cut2&cut3&cut4&cut5&cut6&cut7&cut8)
-        num_cum_cut8 = np.sum(cut1&cut2&cut3&cut4&cut5&cut6&cut7&cut8&cut9)
-        num_cum = np.array([num for num in [num_cut1,num_cum_cut1, num_cum_cut2, num_cum_cut3, num_cum_cut4, num_cum_cut5, num_cum_cut6, num_cum_cut7, num_cum_cut8]])
-        if cut_args > 0:
-            cuts = cuts_all[:cut_args]
-            combined_cut = np.logical_and.reduce(cuts)
-            dr9_chunk_sel = dr9_chunk[combined_cut]
-            dr9_chunk_pz_sel = dr9_chunk_pz[combined_cut]
-
-        else:
-            dr9_chunk_sel = dr9_chunk[cut1&cut2&cut3&cut4&cut5&cut6&cut7&cut8&cut9]
-            dr9_chunk_pz_sel = dr9_chunk_pz[cut1&cut2&cut3&cut4&cut5&cut6&cut7&cut8&cut9]
-            
-        final_table = hstack([dr9_chunk_sel, dr9_chunk_pz_sel])
+        k       = np.array([np.count_nonzero(c) for c in cuts_all])
+        num_cum = np.array([np.count_nonzero(np.logical_and.reduce(cuts_all[:i+1]))
+                            for i in range(len(cuts_all))])
+    
         name = os.path.basename(fits_path).replace('.fits', '')
-        dct={'name':name,'total': total_num, 
-        'masked': num_masked,
-            'cuts': k,
-            'cumulative': num_cum,'final_table_length': len(final_table)}
-        return final_table,  dct
+        dct  = {'name': name, 'total': total_num,
+                'cuts': k, 'cumulative': num_cum}
+        
+        if mode == 'cumulative':
+            tables = []
+            combined = np.ones(len(dr9_chunk), dtype=bool)
+            for c in cuts_all:
+                combined &= c
+                t = hstack([dr9_chunk[combined], dr9_chunk_pz[combined]])
+                tables.append(t)
+            return tables, dct
+        elif mode == 'individual':
+            tables = []
+            for c in cuts_all:
+                t = hstack([dr9_chunk[c], dr9_chunk_pz[c]])
+                tables.append(t)
+            return tables, dct
+        else:
+            if cut_args > 0 and cut_args <= 4:
+                combined_cut = np.logical_and.reduce(cuts_all[:cut_args])
+            elif cut_args == 10:
+                combined_cut = cuts_all[0] & cuts_all[7] & cuts_all[8]
+            elif cut_args == 11:
+                combined_cut = cuts_all[0] & cuts_all[8]
+            else:
+                combined_cut = np.logical_and.reduce(cuts_all)
+    
+            final_table = hstack([dr9_chunk[combined_cut], dr9_chunk_pz[combined_cut]])
+            dct['final_table_length'] = len(final_table)
+            return final_table, dct
+
+
+
 
 def main():
     input_dir1 = f"/storage/shadab/data/legacy_survey/dr9/{directory}/sweep/9.0/"
     input_dir2 = f"/storage/shadab/data/legacy_survey/dr9/{directory}/sweep/9.0-photo-z/"
-    if cut_args == 0:
-        output_file = f"/user/animesh.sah/FP_CUTS/{directory}_cuts_v11.fits"
+    base_out = "/user/animesh.sah/FP_CUTS"
+    if mode == 'cumulative':
+        out_dir = os.path.join(base_out, f"cumulative_{directory}_test")
+        os.makedirs(out_dir, exist_ok=True)
+    elif mode == 'individual':
+        out_dir = os.path.join(base_out, f"individual_{directory}_test")
+        os.makedirs(out_dir, exist_ok=True)
     else:
-        output_file = f"/user/animesh.sah/FP_CUTS/{directory}_cuts_only_{cut_args}.fits"
-
+        out_dir = base_out
+        os.makedirs(out_dir, exist_ok=True)
+        if cut_args == 0:
+            output_file = os.path.join(out_dir, f"{directory}_cuts_v12.fits")
+        else:
+            output_file = os.path.join(out_dir, f"{directory}_cuts_only_{cut_args}.fits")
     file_pairs = []
+
+
     for fname in os.listdir(input_dir1):
         if fname.endswith(".fits") and "-pz" not in fname:
             pz_name = fname.replace(".fits", "-pz.fits")
@@ -257,31 +205,39 @@ def main():
         results= pool.map(process_file_pair, file_pairs)
     results = [r for r in results if r is not None]
 
-    table, cut_counts = zip(*results)
-    merged = {}
-    
-    l=np.array([len(r) for r in table])
-    merged = vstack(table)  # table can be a tuple
-
-    print(len(merged['RA']))
-    print(len(merged.as_array()))
-    import pickle
-    # with open("south_dict_v1.pkl", "wb") as f:
-    #     pickle.dump(merged, f)
-    print(f'length of the total object is with {cut_args} cuts in {directory}: {len(merged)}')
-    fitsio.write(output_file,merged.as_array(),clobber=True)
+    if mode in ('cumulative', 'individual'):
+        # results is a list of  (list_of_9_tables, dct)
+        all_tables, _ = zip(*results)          # all_tables: N_files × 9
+        n_cuts = len(CUT_LABELS)
+ 
+        for i in range(n_cuts):
+            per_cut_tables = [all_tables[f][i] for f in range(len(all_tables))]
+            merged = vstack(per_cut_tables)
+            label  = CUT_LABELS[i]
+            out_path = os.path.join(out_dir, f"{directory}_{mode}_{label}.fits")
+            fitsio.write(out_path, merged.as_array(), clobber=True)
+            print(f"[{mode}] Saved cut {i+1}/9 → {out_path}  (N={len(merged)})")
+ 
+    else:
+        tables, _ = zip(*results)
+        merged = vstack(list(tables))
+        print(f"Total objects with {cut_args} cuts in {directory}: {len(merged)}")
+        fitsio.write(output_file, merged.as_array(), clobber=True)
+        print(f"Saved → {output_file}")
 
 if __name__ == "__main__":
     main()
 
-usage = resource.getrusage(resource.RUSAGE_SELF)
 
+    
+
+usage    = resource.getrusage(resource.RUSAGE_SELF)
 end_time = time.time()
 mem_info = process.memory_info()
-
-print(f"Memory usage: {mem_info.rss / 1024**2:.2f} MB")
-print(f"Wall time: {end_time - start_time:.2f} s")
-print(f"CPU percent: {process.cpu_percent(interval=1.0)} %")
-print(f"User CPU time: {usage.ru_utime:.2f} s")
+print(f"Memory usage:    {mem_info.rss / 1024**2:.2f} MB")
+print(f"Wall time:       {end_time - start_time:.2f} s")
+print(f"CPU percent:     {process.cpu_percent(interval=1.0)} %")
+print(f"User CPU time:   {usage.ru_utime:.2f} s")
 print(f"System CPU time: {usage.ru_stime:.2f} s")
-print(f"Max memory usage: {usage.ru_maxrss / 1024:.2f} MB")
+print(f"Max memory:      {usage.ru_maxrss / 1024:.2f} MB")
+ 
