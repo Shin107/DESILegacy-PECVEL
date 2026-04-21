@@ -20,12 +20,15 @@ parser.add_argument('-z', '--zeropoint_shift', type=float, default=0.0,
                     help='Zeropoint shift to apply to r band magnitudes (default: 0.0)')
 parser.add_argument('-c','--cuts',type = int, default=0,help='Number of cuts to apply ( default =0 , i.e all cuts, 1 means apply only R band cut, 2 means R and G-R cut and so on till 4 , 10=z cuts )' )
 
-parser.add_argument('-m', '--mode', choices=['default', 'cumulative', 'individual'], default='default',
+parser.add_argument('-m', '--mode', choices=['default', 'cumulative', 'individual','sub_individual','cumulative_shape','cumulative_shape_z'], default='default',
                     help=(
                         'Cut mode:\n'
                         '  default     : existing behaviour, one output table\n'
                         '  cumulative  : 9 tables; table_i has cuts 1..i applied in sequence\n'
                         '  individual  : 9 tables; table_i has only cut i applied alone'
+                        ' sub_individual : 6 tables: Cuts 1,2,3 and 7,8,9',
+                        'cumulative_shape: 1 table with 5,6,7,8,9 cuts',
+                        'cumulative_shape_z: 1 table with 5,6,7,8,9 cuts'
                     ))
 args = parser.parse_args()
 directory= args.directory
@@ -151,9 +154,33 @@ def process_file_pair(paths):
                 t = hstack([dr9_chunk[combined], dr9_chunk_pz[combined]])
                 tables.append(t)
             return tables, dct
+        elif mode == 'cumulative_shape_z':
+            tables = []
+            combined = np.ones(len(dr9_chunk), dtype=bool)
+            for i in [4,5,6,7,8]:
+                c = cuts_all[i]
+                t = hstack([dr9_chunk[c], dr9_chunk_pz[c]])
+                tables.append(t)
+            return tables, dct
+        elif mode == 'cumulative_shape':
+            tables = []
+            combined = np.ones(len(dr9_chunk), dtype=bool)
+            for i in [4,5,6]:
+                c = cuts_all[i]
+                t = hstack([dr9_chunk[c], dr9_chunk_pz[c]])
+                tables.append(t)
+            return tables, dct
+
         elif mode == 'individual':
             tables = []
             for c in cuts_all:
+                t = hstack([dr9_chunk[c], dr9_chunk_pz[c]])
+                tables.append(t)
+            return tables, dct
+        elif mode == 'sub_individual':
+            tables = []
+            for i in [0,1,2,6,7,8]:  # Cuts 1,2,3 and 7,8,9
+                c = cuts_all[i]
                 t = hstack([dr9_chunk[c], dr9_chunk_pz[c]])
                 tables.append(t)
             return tables, dct
@@ -181,8 +208,16 @@ def main():
     if mode == 'cumulative':
         out_dir = os.path.join(base_out, f"cumulative_{directory}_test")
         os.makedirs(out_dir, exist_ok=True)
+    elif mode == 'cumulative_shape':
+        out_dir = os.path.join(base_out, f"cumulative_shape_{directory}_test")
+    elif mode == 'cumulative_shape_z':
+        out_dir = os.path.join(base_out, f"cumulative_shape_z_{directory}_test")
+        os.makedirs(out_dir, exist_ok=True)
     elif mode == 'individual':
         out_dir = os.path.join(base_out, f"individual_{directory}_test")
+        os.makedirs(out_dir, exist_ok=True)
+    elif mode == 'sub_individual':
+        out_dir = os.path.join(base_out, f"sub_individual_{directory}_test")
         os.makedirs(out_dir, exist_ok=True)
     else:
         out_dir = base_out
@@ -201,11 +236,11 @@ def main():
                 file_pairs.append((os.path.join(input_dir1, fname),
                                    os.path.join(input_dir2, pz_name)))
     print(f"Total matched files: {len(file_pairs)}")
-    with Pool(cpu_count()) as pool:
+    with Pool(min(cpu_count(), 30)) as pool:
         results= pool.map(process_file_pair, file_pairs)
     results = [r for r in results if r is not None]
 
-    if mode in ('cumulative', 'individual'):
+    if mode in ('cumulative', 'individual', 'sub_individual', 'cumulative_shape', 'cumulative_shape_z'):
         # results is a list of  (list_of_9_tables, dct)
         all_tables, _ = zip(*results)          # all_tables: N_files × 9
         n_cuts = len(CUT_LABELS)
