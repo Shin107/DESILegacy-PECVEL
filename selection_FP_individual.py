@@ -1,7 +1,6 @@
 import numpy as np
 import os
-from multiprocessing import Pool, cpu_count, process
-import os
+from multiprocessing import Pool, cpu_count
 import psutil
 import resource
 import time
@@ -20,22 +19,25 @@ parser.add_argument('-z', '--zeropoint_shift', type=float, default=0.0,
                     help='Zeropoint shift to apply to r band magnitudes (default: 0.0)')
 parser.add_argument('-c','--cuts',type = int, default=0,help='Number of cuts to apply ( default =0 , i.e all cuts, 1 means apply only R band cut, 2 means R and G-R cut and so on till 4 , 10=z cuts )' )
 
-parser.add_argument('-m', '--mode', choices=['default', 'cumulative', 'individual','sub_individual','cumulative_shape','cumulative_shape_z'], default='default',
+parser.add_argument('-m', '--mode', choices=['default', 'cumulative', 'individual','sub_individual','cumulative_shape','cumulative_shape_z','shape_combined'], default='default',
                     help=(
-                        'Cut mode:\n'
-                        '  default     : existing behaviour, one output table\n'
-                        '  cumulative  : 9 tables; table_i has cuts 1..i applied in sequence\n'
-                        '  individual  : 9 tables; table_i has only cut i applied alone'
-                        ' sub_individual : 6 tables: Cuts 1,2,3 and 7,8,9',
-                        'cumulative_shape: 1 table with 5,6,7,8,9 cuts',
-                        'cumulative_shape_z: 1 table with 5,6,7,8,9 cuts'
+                        'Cut mode: '
+                        'default=one output table; '
+                        'cumulative=9 tables with cuts 1..i applied in sequence; '
+                        'individual=9 tables with only cut i applied alone; '
+                        'sub_individual=6 tables for cuts 1,2,3 and 7,8,9; '
+                        'cumulative_shape=3 tables for cuts 5,6,7; '
+                        'cumulative_shape_z=5 tables for cuts 5,6,7,8,9'
+                        'shape_combined=combined shape tables'
                     ))
+parser.add_argument('-D', '--diagnostic', action='store_true',default=False,
+                    help='Print diagnostic info about cut counts and cumulative losses')
 args = parser.parse_args()
 directory= args.directory
 zpt = args.zeropoint_shift
 cut_args = args.cuts
 mode = args.mode
-
+diagnostic = args.diagnostic
 
 CUT_LABELS = [
     'cut1_R_lt_18',
@@ -49,6 +51,15 @@ CUT_LABELS = [
     'cut9_ZL95_lt_01',
 ]
 
+
+MODE_INDICES = {
+    'cumulative': list(range(9)),
+    'individual': list(range(9)),
+    'sub_individual': [0,1,2,6,7,8],
+    'cumulative_shape': [4,5,6],
+    'cumulative_shape_z': [4,5,6,7,8],
+    'shape_combined': [4,5,6]
+}
 def _compute_mags_and_shapes(dr9_chunk, fits_path):
     """Reusable helper: compute MAG, FIBERMAG, MAG_NOEXT, r_circ, bba."""
     MAG, FIBERMAG, MAG_NOEXT = {}, {}, {}
@@ -94,110 +105,120 @@ def selector(MAG,r_circ,bba,dr9_chunk,dr9_chunk_pz):
             (dr9_chunk_pz['Z_PHOT_MEDIAN'] < 0.15),
             (dr9_chunk_pz['Z_PHOT_L95'] < 0.1)]
 def process_file_pair(paths):
-        fits_path, pz_path = paths
-    
-    # try:
-        cols1 = [ 'BRICKID','OBJID','BRICKNAME','RA', 'DEC','SHAPE_E1','SHAPE_E2','SHAPE_R' ,'FLUX_G','FLUX_R','FLUX_Z','MW_TRANSMISSION_G','MW_TRANSMISSION_R','MW_TRANSMISSION_Z','SHAPE_E1','SHAPE_E2','SERSIC','TYPE','NOBS_G','NOBS_R','NOBS_Z','MASKBITS','FRACMASKED_G','FRACMASKED_R','FRACMASKED_Z','FRACFLUX_G','FRACFLUX_R','FRACFLUX_Z','FRACIN_G', 'FRACIN_R',
-       'FRACIN_Z','GAIA_PHOT_G_MEAN_MAG','NOBS_G','NOBS_R','NOBS_Z','FIBERFLUX_G', 'FIBERFLUX_R', 'FIBERFLUX_Z','FLUX_W1','FLUX_W2','FLUX_W3','FLUX_W4','MW_TRANSMISSION_W1','MW_TRANSMISSION_W2','MW_TRANSMISSION_W3','MW_TRANSMISSION_W4','PSFDEPTH_G','PSFDEPTH_R','PSFDEPTH_Z','FLUX_IVAR_G','FLUX_IVAR_R','FLUX_IVAR_Z','FLUX_IVAR_W1','FLUX_IVAR_W2','FLUX_IVAR_W3','PSFSIZE_G','PSFSIZE_R','PSFSIZE_Z','EBV',]
-        cols2 = ['Z_PHOT_MEDIAN','Z_PHOT_L95']
-        
-        # Load data
-        dr9_chunk = Table(fitsio.FITS(fits_path)[1].read(columns=cols1))
-        dr9_chunk_pz = Table(fitsio.FITS(pz_path)[1].read(columns=cols2))
+    fits_path, pz_path = paths
 
-        # Compute magnitude
-        MAG, FIBERMAG, MAG_NOEXT, r_circ, bba = _compute_mags_and_shapes(dr9_chunk, fits_path)
-        dr9_chunk['R_CIRC'] = r_circ
-        dr9_chunk['MAG_G'] = MAG['G']
-        dr9_chunk['MAG_R'] = MAG['R']
-        dr9_chunk['MAG_Z'] = MAG['Z']
-        dr9_chunk['MAG_W1'] = MAG['W1']
-        dr9_chunk['FIBERMAG_G'] = FIBERMAG['G']
-        dr9_chunk['FIBERMAG_R'] = FIBERMAG['R']
-        dr9_chunk['FIBERMAG_Z'] = FIBERMAG['Z']
-        dr9_chunk['MAG_NOEXT_G'] = MAG_NOEXT['G']
-        dr9_chunk['MAG_NOEXT_R'] = MAG_NOEXT['R']
-        dr9_chunk['MAG_NOEXT_Z'] = MAG_NOEXT['Z']
-        
+    cols1 = ['BRICKID', 'OBJID', 'BRICKNAME', 'RA', 'DEC',
+             'SHAPE_E1', 'SHAPE_E2', 'SHAPE_R',
+             'FLUX_G', 'FLUX_R', 'FLUX_Z',
+             'MW_TRANSMISSION_G', 'MW_TRANSMISSION_R', 'MW_TRANSMISSION_Z',
+             'SERSIC', 'TYPE',
+             'NOBS_G', 'NOBS_R', 'NOBS_Z', 'MASKBITS',
+             'FRACMASKED_G', 'FRACMASKED_R', 'FRACMASKED_Z',
+             'FRACFLUX_G', 'FRACFLUX_R', 'FRACFLUX_Z',
+             'FRACIN_G', 'FRACIN_R', 'FRACIN_Z',
+             'GAIA_PHOT_G_MEAN_MAG',
+             'FIBERFLUX_G', 'FIBERFLUX_R', 'FIBERFLUX_Z',
+             'FLUX_W1', 'FLUX_W2', 'FLUX_W3', 'FLUX_W4',
+             'MW_TRANSMISSION_W1', 'MW_TRANSMISSION_W2',
+             'MW_TRANSMISSION_W3', 'MW_TRANSMISSION_W4',
+             'PSFDEPTH_G', 'PSFDEPTH_R', 'PSFDEPTH_Z',
+             'FLUX_IVAR_G', 'FLUX_IVAR_R', 'FLUX_IVAR_Z',
+             'FLUX_IVAR_W1', 'FLUX_IVAR_W2', 'FLUX_IVAR_W3',
+             'PSFSIZE_G', 'PSFSIZE_R', 'PSFSIZE_Z', 'EBV']
+    cols2 = ['Z_PHOT_MEDIAN', 'Z_PHOT_L95']
 
-        
-        # Apply cuts
-        initial_count = len(dr9_chunk)
-        cut_counts = {}
+    dr9_chunk    = Table(fitsio.FITS(fits_path)[1].read(columns=cols1))
+    dr9_chunk_pz = Table(fitsio.FITS(pz_path)[1].read(columns=cols2))
 
-        cuts_diag = selector(MAG,r_circ,bba,dr9_chunk,dr9_chunk_pz)
-        combined = np.ones(len(dr9_chunk), dtype=bool)
-        for label, cut in zip(CUT_LABELS, cuts_diag):
-            combined &= cut
-            cut_counts[label] = np.sum(combined)
-        print(f'Initial : {initial_count}' )
+    MAG, FIBERMAG, MAG_NOEXT, r_circ, bba = _compute_mags_and_shapes(dr9_chunk, fits_path)
+    dr9_chunk['R_CIRC']      = r_circ
+    dr9_chunk['MAG_G']       = MAG['G']
+    dr9_chunk['MAG_R']       = MAG['R']
+    dr9_chunk['MAG_Z']       = MAG['Z']
+    dr9_chunk['MAG_W1']      = MAG['W1']
+    dr9_chunk['FIBERMAG_G']  = FIBERMAG['G']
+    dr9_chunk['FIBERMAG_R']  = FIBERMAG['R']
+    dr9_chunk['FIBERMAG_Z']  = FIBERMAG['Z']
+    dr9_chunk['MAG_NOEXT_G'] = MAG_NOEXT['G']
+    dr9_chunk['MAG_NOEXT_R'] = MAG_NOEXT['R']
+    dr9_chunk['MAG_NOEXT_Z'] = MAG_NOEXT['Z']
+
+    cuts_all      = selector(MAG, r_circ, bba, dr9_chunk, dr9_chunk_pz)
+    initial_count = len(dr9_chunk)
+    total_num     = initial_count
+
+    k       = np.array([np.count_nonzero(c) for c in cuts_all])
+    num_cum = np.array([np.count_nonzero(np.logical_and.reduce(cuts_all[:i + 1]))
+                        for i in range(len(cuts_all))])
+    name = os.path.basename(fits_path).replace('.fits', '')
+    dct  = {'name': name, 'total': total_num, 'cuts': k, 'cumulative': num_cum}
+
+    if diagnostic:
+        combined_diag = np.ones(initial_count, dtype=bool)
+        cut_counts    = {}
+        for label, cut in zip(CUT_LABELS, cuts_all):
+            combined_diag &= cut
+            cut_counts[label] = np.sum(combined_diag)
+        print(f'Initial : {initial_count}')
         prev = initial_count
         for label, count in cut_counts.items():
-            print(f"  {label:30s}: kept={count:7d}  rejected={prev-count:7d}  cumulative_loss={initial_count-count}")
+            print(f"  {label:30s}: kept={count:7d}  rejected={prev - count:7d}"
+                  f"  cumulative_loss={initial_count - count}")
             prev = count
-        total_num = len(dr9_chunk)
-        cuts_all = selector(MAG,r_circ,bba,dr9_chunk,dr9_chunk_pz)
-        
-        k       = np.array([np.count_nonzero(c) for c in cuts_all])
-        num_cum = np.array([np.count_nonzero(np.logical_and.reduce(cuts_all[:i+1]))
-                            for i in range(len(cuts_all))])
-    
-        name = os.path.basename(fits_path).replace('.fits', '')
-        dct  = {'name': name, 'total': total_num,
-                'cuts': k, 'cumulative': num_cum}
-        
-        if mode == 'cumulative':
-            tables = []
-            combined = np.ones(len(dr9_chunk), dtype=bool)
-            for c in cuts_all:
-                combined &= c
-                t = hstack([dr9_chunk[combined], dr9_chunk_pz[combined]])
-                tables.append(t)
-            return tables, dct
-        elif mode == 'cumulative_shape_z':
-            tables = []
-            combined = np.ones(len(dr9_chunk), dtype=bool)
-            for i in [4,5,6,7,8]:
-                c = cuts_all[i]
-                t = hstack([dr9_chunk[c], dr9_chunk_pz[c]])
-                tables.append(t)
-            return tables, dct
-        elif mode == 'cumulative_shape':
-            tables = []
-            combined = np.ones(len(dr9_chunk), dtype=bool)
-            for i in [4,5,6]:
-                c = cuts_all[i]
-                t = hstack([dr9_chunk[c], dr9_chunk_pz[c]])
-                tables.append(t)
-            return tables, dct
 
-        elif mode == 'individual':
-            tables = []
-            for c in cuts_all:
-                t = hstack([dr9_chunk[c], dr9_chunk_pz[c]])
-                tables.append(t)
-            return tables, dct
-        elif mode == 'sub_individual':
-            tables = []
-            for i in [0,1,2,6,7,8]:  # Cuts 1,2,3 and 7,8,9
-                c = cuts_all[i]
-                t = hstack([dr9_chunk[c], dr9_chunk_pz[c]])
-                tables.append(t)
-            return tables, dct
+    if mode == 'cumulative':
+        tables  = []
+        running = np.ones(len(dr9_chunk), dtype=bool)
+        for c in cuts_all:                  # FIX: iterate cuts_all, not MODE_INDICES integers
+            running &= c
+            tables.append(hstack([dr9_chunk[running], dr9_chunk_pz[running]]))
+        return tables, dct
+
+    elif mode == 'cumulative_shape':
+        tables  = []
+        running = np.ones(len(dr9_chunk), dtype=bool)
+        for i in MODE_INDICES['cumulative_shape']:
+            running &= cuts_all[i]
+            tables.append(hstack([dr9_chunk[running], dr9_chunk_pz[running]]))
+        return tables, dct
+
+    elif mode == 'cumulative_shape_z':
+        tables  = []
+        running = np.ones(len(dr9_chunk), dtype=bool)
+        for i in MODE_INDICES['cumulative_shape_z']:
+            running &= cuts_all[i]
+            tables.append(hstack([dr9_chunk[running], dr9_chunk_pz[running]]))
+        return tables, dct
+    elif mode == 'shape_combined':
+        running = np.ones(len(dr9_chunk), dtype=bool)
+        for i in MODE_INDICES['shape_combined']:
+            running &= cuts_all[i]
+        t = hstack([dr9_chunk[running], dr9_chunk_pz[running]])
+        return t, dct         
+        
+
+    elif mode == 'individual':
+        tables = [hstack([dr9_chunk[c], dr9_chunk_pz[c]]) for c in cuts_all]
+        return tables, dct
+
+    elif mode == 'sub_individual':
+        tables = [hstack([dr9_chunk[cuts_all[i]], dr9_chunk_pz[cuts_all[i]]])
+                  for i in MODE_INDICES['sub_individual']]
+        return tables, dct
+
+    else:  # default
+        if 0 < cut_args <= 4:
+            combined_cut = np.logical_and.reduce(cuts_all[:cut_args])
+        elif cut_args == 10:
+            combined_cut = cuts_all[0] & cuts_all[7] & cuts_all[8]
+        elif cut_args == 11:
+            combined_cut = cuts_all[0] & cuts_all[8]
         else:
-            if cut_args > 0 and cut_args <= 4:
-                combined_cut = np.logical_and.reduce(cuts_all[:cut_args])
-            elif cut_args == 10:
-                combined_cut = cuts_all[0] & cuts_all[7] & cuts_all[8]
-            elif cut_args == 11:
-                combined_cut = cuts_all[0] & cuts_all[8]
-            else:
-                combined_cut = np.logical_and.reduce(cuts_all)
-    
-            final_table = hstack([dr9_chunk[combined_cut], dr9_chunk_pz[combined_cut]])
-            dct['final_table_length'] = len(final_table)
-            return final_table, dct
+            combined_cut = np.logical_and.reduce(cuts_all)
 
+        final_table = hstack([dr9_chunk[combined_cut], dr9_chunk_pz[combined_cut]])
+        dct['final_table_length'] = len(final_table)
+        return final_table, dct
 
 
 
@@ -207,25 +228,24 @@ def main():
     base_out = "/user/animesh.sah/FP_CUTS"
     if mode == 'cumulative':
         out_dir = os.path.join(base_out, f"cumulative_{directory}_test")
-        os.makedirs(out_dir, exist_ok=True)
     elif mode == 'cumulative_shape':
         out_dir = os.path.join(base_out, f"cumulative_shape_{directory}_test")
     elif mode == 'cumulative_shape_z':
         out_dir = os.path.join(base_out, f"cumulative_shape_z_{directory}_test")
-        os.makedirs(out_dir, exist_ok=True)
     elif mode == 'individual':
         out_dir = os.path.join(base_out, f"individual_{directory}_test")
-        os.makedirs(out_dir, exist_ok=True)
     elif mode == 'sub_individual':
         out_dir = os.path.join(base_out, f"sub_individual_{directory}_test")
-        os.makedirs(out_dir, exist_ok=True)
+    elif mode == 'shape_combined':
+        out_dir = os.path.join(base_out, f"shape_combined_{directory}_test")
+        output_file = os.path.join(out_dir, f"{directory}_shape_combined_cuts.fits")
     else:
         out_dir = base_out
-        os.makedirs(out_dir, exist_ok=True)
         if cut_args == 0:
             output_file = os.path.join(out_dir, f"{directory}_cuts_v12.fits")
         else:
             output_file = os.path.join(out_dir, f"{directory}_cuts_only_{cut_args}.fits")
+    os.makedirs(out_dir, exist_ok=True)
     file_pairs = []
 
 
@@ -240,18 +260,19 @@ def main():
         results= pool.map(process_file_pair, file_pairs)
     results = [r for r in results if r is not None]
 
-    if mode in ('cumulative', 'individual', 'sub_individual', 'cumulative_shape', 'cumulative_shape_z'):
-        # results is a list of  (list_of_9_tables, dct)
+    if mode in  ('cumulative', 'individual', 'sub_individual',
+            'cumulative_shape', 'cumulative_shape_z'):
         all_tables, _ = zip(*results)          # all_tables: N_files × 9
-        n_cuts = len(CUT_LABELS)
+        indices = MODE_INDICES[mode]
  
-        for i in range(n_cuts):
-            per_cut_tables = [all_tables[f][i] for f in range(len(all_tables))]
-            merged = vstack(per_cut_tables)
-            label  = CUT_LABELS[i]
+        for out_pos, cut_idx in enumerate(indices):
+            per_cut_tables = [all_tables[f][out_pos] for f in range(len(all_tables))]
+            merged   = vstack(per_cut_tables)
+            label    = CUT_LABELS[cut_idx]
             out_path = os.path.join(out_dir, f"{directory}_{mode}_{label}.fits")
             fitsio.write(out_path, merged.as_array(), clobber=True)
-            print(f"[{mode}] Saved cut {i+1}/9 → {out_path}  (N={len(merged)})")
+            print(f"[{mode}] Saved cut {out_pos + 1}/{len(indices)} → {out_path}  (N={len(merged)})")
+
  
     else:
         tables, _ = zip(*results)
@@ -266,13 +287,13 @@ if __name__ == "__main__":
 
     
 
-usage    = resource.getrusage(resource.RUSAGE_SELF)
-end_time = time.time()
-mem_info = process.memory_info()
-print(f"Memory usage:    {mem_info.rss / 1024**2:.2f} MB")
-print(f"Wall time:       {end_time - start_time:.2f} s")
-print(f"CPU percent:     {process.cpu_percent(interval=1.0)} %")
-print(f"User CPU time:   {usage.ru_utime:.2f} s")
-print(f"System CPU time: {usage.ru_stime:.2f} s")
-print(f"Max memory:      {usage.ru_maxrss / 1024:.2f} MB")
- 
+    usage    = resource.getrusage(resource.RUSAGE_SELF)
+    end_time = time.time()
+    mem_info = process.memory_info()
+    print(f"Memory usage:    {mem_info.rss / 1024**2:.2f} MB")
+    print(f"Wall time:       {end_time - start_time:.2f} s")
+    print(f"CPU percent:     {process.cpu_percent(interval=1.0)} %")
+    print(f"User CPU time:   {usage.ru_utime:.2f} s")
+    print(f"System CPU time: {usage.ru_stime:.2f} s")
+    print(f"Max memory:      {usage.ru_maxrss / 1024:.2f} MB")
+    
