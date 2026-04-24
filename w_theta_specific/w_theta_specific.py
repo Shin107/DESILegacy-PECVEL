@@ -34,18 +34,18 @@ parser.add_argument('-e','--error', choices=['jackknife','bootstrap','none'], de
 
 
 
-parser.add_argument('--add_weights', action='store_true',default=True,
+parser.add_argument('--add_weights', action='store_true',default=False,
                     help='If true, adds weights to the correlation function calculation (only for treecorr)')
 parser.add_argument('--nside_weight', type=int, default=64,
                     help='nside used for  healpix weights')
 parser.add_argument('--multiple_patch', action='store_true',default=False,
                     help='If true, runs for multiple patch numbers (only for treecorr with jackknife or bootstrap)')
-parser.add_argument('--kind', type=str, choices=['equal_10','equal_5','partial_percentile','full_sample'], default='partial_percentile',)
+parser.add_argument('--kind', type=str, choices=['equal_10','equal_5','partial_percentile','full_sample'], default=None,)
 parser.add_argument('--suffix',type=str, default='',help='suffix for the output file name (only for treecorr with jackknife or bootstrap)')
 parser.add_argument('--covariance', action='store_true', default=False, help='If true, saves the covariance matrix alongside the w_theta values (only for treecorr with jackknife or bootstrap)')
 
 parser.add_argument('--file_path',action='store', default='/user/animesh.sah/FP_CUTS/data_cleaned_full_sample/cleaned_cut0.fits', help='Path to the input FITS file')
-
+parser.add_argument('--base_path', help='Path to the input file or directory',action='store',default = None)
 args = parser.parse_args()
 part = args.part
 method = args.method
@@ -58,8 +58,13 @@ if args.kind != None and not WGT:
     import sys 
     sys.exit('Error: --kind option can only be used if --add_weights is set to True')
 
-base_path = Path(file_path).parent
-os.makedirs(base_path / 'w_theta_results', exist_ok=True)
+if args.base_path == None:
+    base_path = Path(file_path).parent
+
+else:
+    base_path = Path(args.base_path)
+    os.makedirs(base_path / 'w_theta_results', exist_ok=True)
+
 table_selection = Table(fitsio.FITS(file_path)[1].read())
 
 

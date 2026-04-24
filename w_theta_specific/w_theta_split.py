@@ -64,6 +64,16 @@ WGT          = args.add_weights
 nside_weight = args.nside_weight
 covariance   = args.covariance
 
+def _add_features(table):
+    e1,e2  = table['SHAPE_E1'], table['SHAPE_E2']
+    epsilon = np.sqrt(e1**2 + e2**2)
+    bba = (1 - epsilon) / (1 + epsilon)
+    r_circ = np.sqrt(bba) * table['SHAPE_R']
+    table['R_CIRC'] = r_circ
+    table['BBA']    = bba
+    return table
+
+
 if args.kind is not None and not WGT:
     import sys
     sys.exit('Error: --kind option can only be used if --add_weights is set to True')
@@ -80,7 +90,7 @@ if part == 'north':
     table_selection = table_selection[table_selection['DEC'] >= 32.375]
 elif part == 'south':
     table_selection = table_selection[table_selection['DEC'] < 32.375]
-
+table_selection = _add_features(table_selection)
 # Load randoms
 randoms = Table(fitsio.FITS('/user/animesh.sah/FP_CUTS/randoms_5M.fits')[1].read())
 if part == 'north':
