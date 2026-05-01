@@ -74,6 +74,8 @@ elif part=='south':
     table_selection = table_selection[table_selection['DEC']<32.375]
 
 
+table_selection = table_selection[table_selection['DEC']>-30]
+
 
 
 #table_selection = table_selection[table_selection['MAG_R']<17]
@@ -195,7 +197,7 @@ if method=='treecorr' and error=='none':
     #print(rr.meanr)
     #print(dd.meanr - dr.meanr)
     #print(dd.meanlogr)
-
+    print(f'Saving the results to {base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}.npy')
     np.save(f'{base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}.npy', np.vstack([dd.meanr,xi,sig]))
 
 
@@ -226,7 +228,7 @@ elif method=='treecorr' and error!='none':
         if args.covariance:
             np.save(f'{base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_jackknife_patches_{npatch}_w_{WGT}_{args.suffix}_covariance.npy', cov)
             #np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{npatch}_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}_covariance.npy', cov)   
-        
+        print(f'Saving the results to {base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_jackknife_patches_{npatch}_w_{WGT}_{args.suffix}.npy')
         #np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{npatch}_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}.npy', np.vstack([dd.meanr,xi,sig]))
         np.save(f'{base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_jackknife_patches_{npatch}_w_{WGT}_{args.suffix}.npy',  np.vstack([dd.meanr,xi,sig]))
         
@@ -267,12 +269,14 @@ elif method=='treecorr' and error!='none':
             # Save each result separately or as a combined array as needed
             for n_patch, meanr, xi, sig, cov in results:
                 #np.save(f'/user/animesh.sah/w_theta_results/treecorr_{part}_{error}_patches_{n_patch}_{N_bootstrap}_{min_sep}_to_{max_sep}_w_{WGT}_{args.suffix}.npy', np.vstack([meanr, xi, sig])) 
+                print(f'Saving the results to {base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_bootstrap_patches_{n_patch}_w_{WGT}_{args.suffix}.npy')
                 np.save(f'{base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_bootstrap_patches_{n_patch}_w_{WGT}_{args.suffix}.npy', np.vstack([meanr, xi, sig]))  
         else:
             n_patch  = 50 
             _,dd_meanr,xi,sig,cov = run_treecorr_bootstrap(n_patch)
 
                                      
+            print(f'Saving the results to {base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_bootstrap_patches_{n_patch}_w_{WGT}_{args.suffix}.npy')  
             np.save(f'{base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_bootstrap_patches_{n_patch}_w_{WGT}_{args.suffix}.npy', np.vstack([dd_meanr,xi,sig]))
             if args.covariance:
                 np.save(f'{base_path}/w_theta_results/theta_{min_sep}_to_{max_sep}_bootstrap_patches_{n_patch}_w_{WGT}_{args.suffix}_covariance.npy', cov)
