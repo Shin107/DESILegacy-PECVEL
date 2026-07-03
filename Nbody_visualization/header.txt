@@ -1,0 +1,182 @@
+#########################
+#INPUTS
+Abacushalo_dir : /global/cfs/cdirs/desi/cosmosim/Abacus/AbacusSummit_base_c000_ph000/halos/z0.100/
+outhalo_dir : /global/cfs/cdirs/desi/cosmosim/NFW_Abacus/AbacusSummit_base_c000_ph000/z0.100/
+boxsize : 2000
+nsub_box : 4
+sub_this : [-1]
+nasdf_load : 1
+max_massperc : 100
+nstep : 1
+nproc : 8
+clean : True
+##########################
+#<class 'int'>
+AllowGroupFinding : 1
+BackupStepInterval : -1
+CPD : 1701
+Conv_IOCores : 0
+Conv_OMP_NUM_THREADS : 42
+Conv_zwidth : 0
+ConvolutionCacheSizeMB : 200
+DeleteICsAfterFirstBackup : 1
+DerivativeExpansionRadius : 8
+DirectBPD : 2
+Do2LPTVelocityRereading : 0
+DoublePrecision : 0
+FullStepNumber : 1106
+GroupRadius : 10
+ICPositionRange : 2000
+IOCores : 68
+LPTStepNumber : 0
+LagrangianPTOrder : 2
+LogVerbosity : 2
+MicrostepTimeStep : 0
+MinL1HaloNP : 35
+MunmapThreadCore : 69
+NGPUThreadCores : 2
+NLightCones : 3
+NP : 330225942528
+NearFieldRadius : 2
+NodeRank : 0
+NodeSize : 0
+NumSlabsInsertList : 2
+NumSlabsInsertListIC : 8
+OMP_NUM_THREADS : 70
+Order : 8
+Parallel : 1
+PowerSpectrumN1d : 256
+PowerSpectrumStepInterval : -1
+ProperSoftening : 1
+RamDisk : 1
+SO_EvolvingThreshold : 1
+ZD_NumBlock : 384
+ZD_Seed : 12321
+ZD_Version : 2
+ZD_qPLT : 1
+ZD_qPLT_rescale : 1
+checkpoint_timeout : 5
+hMpc : 1
+step_timeout : 15
+##########################
+#<class 'str'>
+BackupDirectory : /gpfs/alpine/proj-shared/ast145/AbacusSummit/AbacusSummit_base_c000_ph000
+CodeVersion : 8d43e2d166b9bcb0168a6ca49a4643d06bfb2625
+Conv_IOMode : overwrite
+Conv_OMP_PLACES : {0}:21:4,{88}:21:4
+Conv_OMP_PROC_BIND : spread
+DerivativesDirectory : /gpfs/alpine/proj-shared/ast145/Derivatives
+GroupDirectory : /gpfs/alpine/proj-shared/ast145/AbacusSummit/AbacusSummit_base_c000_ph000/group
+ICFormat : RVZel
+InitialConditionsDirectory : /gpfs/alpine/proj-shared/ast145/AbacusSummit/AbacusSummit_base_c000_ph000/ic
+LightConeDirectory : /gpfs/alpine/proj-shared/ast145/AbacusSummit/AbacusSummit_base_c000_ph000/lightcone
+LocalWorkingDirectory : /dev/shm/nmaksimova//AbacusSummit_base_c000_ph000
+LogDirectory : /gpfs/alpine/proj-shared/ast145/AbacusSummit/AbacusSummit_base_c000_ph000/log
+MachineName : b16n02
+MultipoleDirectory : /dev/shm/nmaksimova//AbacusSummit_base_c000_ph000/multipole
+OMP_PLACES : {0}:17:4,{1}:17:4,{88}:18:4,{89}:18:4
+OMP_PROC_BIND : spread
+OutputDirectory : /gpfs/alpine/proj-shared/ast145/AbacusSummit/AbacusSummit_base_c000_ph000
+OutputFormat : Pack9
+OutputFormatVersion : v2.2
+OutputType : GroupOutput
+ParameterFileName : abacus.par
+Pipeline : singlestep
+RunTime : Fri Apr 24 00:02:47 2020
+SimComment : Planck2018 LCDM
+SimName : AbacusSummit_base_c000_ph000
+SimSet : AbacusSummit
+SiteName : summit
+SofteningType : single_spline
+StateIOMode : overwrite
+TaylorDirectory : /dev/shm/nmaksimova//AbacusSummit_base_c000_ph000/taylor
+WorkingDirectory : /gpfs/alpine/proj-shared/ast145/AbacusSummit/AbacusSummit_base_c000_ph000
+ZD_PLT_filename : /ccs/home/nmaksimova/abacus/external/zeldovich-PLT/eigmodes128
+ZD_Pk_filename : /ccs/home/nmaksimova/abacus/external/AbacusSummit/Cosmologies/abacus_cosm000/CLASS_power
+ZD_mpirun_cmd : jsrun -n1 -cALL_CPUS -a1 -r1 -b rs
+ZeldovichDirectory : /ccs/home/nmaksimova/abacus/external/zeldovich-PLT
+mpirun_cmd : jsrun -nALL_HOSTS -cALL_CPUS -a1 -r1 -gALL_GPUS -b none
+##########################
+#<class 'float'>
+BoxSize : 2000.0
+BoxSizeHMpc : 2000.0
+BoxSizeMpc : 2969.1211401425176
+ConvolutionL1CacheSizeMB : 0.015625
+CoordinateDistanceHMpc : 292.5861830707283
+DeltaEtaDrift : 0.0007023815099787001
+DeltaRedshift : 0.000670922877507
+DeltaScaleFactor : 0.000554143728125
+DeltaTime : 0.000580126734663
+DensityKernelRad : 0.4
+DensityKernelRad2 : 3.34898e-09
+FinalRedshift : 0.1
+FirstHalfEtaKick : 0.0003192156461468976
+Growth : 0.747802609695575
+Growth_on_a_n : 0.822370742811481
+H0 : 67.36
+Htime : 0.901401160072374
+HubbleNow : 1.050870378305526
+HubbleTimeGyr : 14.516330166270784
+HubbleTimeHGyr : 9.7782
+ICVelocity2Displacement : 1.0
+InitialRedshift : 99.0
+L0DensityThreshold : 99.40117835998535
+LastHalfEtaKick : 0.0003191183410788945
+N_ncdm : 1.0
+N_ur : 2.0328
+OmegaNow_DE : 0.620112555054177
+OmegaNow_K : 0.0
+OmegaNow_m : 0.379887444945823
+Omega_DE : 0.684808
+Omega_K : 0.0
+Omega_M : 0.315192
+Omega_Smooth : 0.00142
+ParticleMassHMsun : 2109081520.453063
+ParticleMassMsun : 3131059264.330557
+ParticleSubsampleA : 0.03
+ParticleSubsampleB : 0.07
+Redshift : 0.1
+SODensityL1 : 331.3372611999512
+SODensityL2 : 1325.3490447998047
+SO_alpha_eligible : 0.8
+ScaleFactor : 0.9090909090909092
+ScaleFactorHalf : 0.9088138190720043
+SofteningLength : 0.007233796296296301
+SofteningLengthNow : 0.007962029245352342
+SofteningLengthNowInternal : 0.01715952656870601
+SofteningMax : 0.08680555555555561
+Time : 0.857766265641474
+TimeStepAccel : 0.25
+TimeStepDlna : 0.03
+VelZSpace_to_Canonical : 0.86848791595498
+VelZSpace_to_kms : 191067.3415100957
+ZD_PLT_target_z : 12.0
+ZD_Pk_file_redshift : 1.0
+ZD_Pk_norm : 8.0
+ZD_Pk_scale : 1.0
+ZD_Pk_sigma_ratio : 0.02113950155394198
+ZD_Pk_smooth : 0.0
+ZD_f_cluster : 0.9954948095129318
+ZD_k_cutoff : 1.0
+etaD : -4.156711431582817
+etaK : 3.141783118201425
+f_growth : 0.58400728748126
+fsmooth : 0.004505190487068
+n_s : 0.9649
+omega_b : 0.02237
+omega_cdm : 0.12
+omega_ncdm : 0.0006442
+ppd : 6912.0
+w : -1.0
+w0 : -1.0
+wa : 0.0
+##########################
+#<class 'list'>
+FoFLinkingLength : [0.25, 0.25, 0.25]
+GPUQueueAssignments : [0, 0, 0, 1, 1, 1]
+GPUThreadCoreStart : [72, 76, 80, 160, 164, 168]
+L1OutputRedshifts : [8.0, 5.0, 3.0, 2.75, 2.5, 2.25, 2.0, 1.85, 1.7, 1.625, 1.55, 1.475, 1.4, 1.325, 1.25, 1.175, 1.1, 1.025, 0.95, 0.875, 0.8, 0.725, 0.65, 0.575, 0.5, 0.45, 0.4, 0.35, 0.3, 0.25, 0.2, 0.15, 0.1]
+LightConeOrigins : [-990.0, -990.0, -990.0, -990.0, -990.0, -2990.0, -990.0, -2990.0, -990.0]
+SODensity : [200, 800]
+TimeSliceRedshifts : [3.0, 2.5, 2.0, 1.7, 1.4, 1.1, 0.8, 0.5, 0.4, 0.3, 0.2, 0.1]
+TimeSliceRedshifts_Subsample : [3.0, 2.5, 2.0, 1.7, 1.4, 1.1, 0.8, 0.5, 0.4, 0.3, 0.2, 0.1]
