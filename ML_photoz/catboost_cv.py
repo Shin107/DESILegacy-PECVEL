@@ -7,6 +7,7 @@ import fitsio
 import argparse
 import time
 import logging
+import sys
 from pathlib import Path
 from Metrics import PhotoZMetrics, SigmaNMAD  # Your custom metrics class
 import multiprocessing
@@ -128,10 +129,104 @@ class PhotoZCatBoostPipeline:
         return normed_weights
     
 
-    def compute_magnitudes(self, legacy):
+    @staticmethod
+    def colour_transform_config(cfg):
+        """Read the north->south photometric transform from the YAML config.
+
+            photometry:
+              colour_transform:
+                enable: true
+                apply_to: "north"          # region whose magnitudes are corrected
+                pivot: 0.9953964505060111  # BASS-frame (g-r) the fit was pivoted on
+                clip: [0.7, 1.2]           # colour range the fit was made over; null to disable
+                coeffs:                    # band: [a, b] from d = m_DECaLS - m_north
+                  G: [-0.0663, -0.0798]
+                  R: [-0.0179, -0.0360]
+                  Z: [-0.0123, -0.0233]
+
+        Returns a dict of settings, empty when the block is absent or disabled.
+        Setting every b to 0 reduces this to a plain zeropoint shift.
+        """
+        ct = ((cfg or {}).get('photometry') or {}).get('colour_transform') or {}
+        if not ct.get('enable', False):
+            return {}
+
+        coeffs = ct.get('coeffs') or {}
+        if not coeffs:
+            raise ValueError("photometry.colour_transform.enable is true but no "
+                             "'coeffs' were given")
+        if ct.get('apply_to') is None:
+            raise ValueError("photometry.colour_transform needs 'apply_to' naming "
+                             "the region whose magnitudes are corrected")
+        if ct.get('pivot') is None:
+            raise ValueError("photometry.colour_transform needs 'pivot'")
+
+        clip = ct.get('clip')
+        return {'apply_to': str(ct['apply_to']),
+                'pivot': float(ct['pivot']),
+                'clip': None if clip is None else (float(clip[0]), float(clip[1])),
+                'coeffs': {str(b).upper(): (float(v[0]), float(v[1]))
+                           for b, v in coeffs.items()}}
+
+    def apply_colour_transform(self, legacy, ct):
+        """Correct magnitudes onto the reference photometric system.
+
+            MAG_b -> MAG_b + a_b + b_b * (clip(g-r) - pivot)
+
+        Sign follows the fit directly: a and b come from
+        d = m_DECaLS - m_north regressed on the north (g-r), so a positive a
+        brightens nothing and the numbers can be pasted straight from `coeffs`.
+
+        The colour is taken from the uncorrected MAG_G - MAG_R so that all bands
+        share one colour, and is clipped to the range the fit was made over --
+        beyond that the linear form is extrapolation, not measurement.
+
+        Must be called after MAG_<band> exists and before any colour is formed,
+        so every MAG_<b1><b2> inherits the correction.
+        """
+        if not ct:
+            return legacy
+
+        if self.region_tag == 'both':
+            raise ValueError(
+                "colour_transform is enabled with region='both': the two regions "
+                "are already vstacked here, so the correction cannot be applied "
+                "to one of them only. Run each region separately, or disable it.")
+
+        if self.region_tag != ct['apply_to']:
+            logger.info(f"Colour transform configured for '{ct['apply_to']}' but "
+                        f"region is '{self.region_tag}' -- not applied")
+            return legacy
+
+        gr = np.asarray(legacy['MAG_G'] - legacy['MAG_R'], dtype=float)
+        if ct['clip'] is not None:
+            lo, hi = ct['clip']
+            n_out = int(np.sum(np.isfinite(gr) & ((gr < lo) | (gr > hi))))
+            gr = np.clip(gr, lo, hi)
+            logger.info(f"Colour clipped to [{lo}, {hi}]: {n_out} of {len(gr)} "
+                        f"objects outside the fit range")
+        dcol = gr - ct['pivot']
+
+        for band, (a, b) in ct['coeffs'].items():
+            col = f'MAG_{band}'
+            if col not in legacy.colnames:
+                raise KeyError(f"colour_transform asks for band '{band}' but "
+                               f"{col} was not computed")
+            corr = a + b * dcol
+            legacy[col] = legacy[col] + corr
+            logger.info(f"Colour transform applied to {col}: a={a:+.4f} "
+                        f"b={b:+.4f}/mag, median corr={np.nanmedian(corr):+.4f} "
+                        f"({self.region_tag}, {len(legacy)} rows)")
+
+        self.colour_transform_applied = ct
+        return legacy
+
+    def compute_magnitudes(self, legacy, cfg=None):
         """Compute magnitudes and color indices from flux measurements"""
         logger.info("Computing magnitudes and colors...")
-        
+
+        ctrans = self.colour_transform_config(cfg)
+
         MAG = {}
         MAG_NOEXT = {}
         
@@ -154,8 +249,11 @@ class PhotoZCatBoostPipeline:
             
             legacy[f'MAG_{band}'] = MAG[band]
 
-        # Compute color indicesEditor: Font Size
+        # Correction goes here: after MAG_<band>, before any colour, so that
+        # every MAG_<b1><b2> below inherits it automatically.
+        legacy = self.apply_colour_transform(legacy, ctrans)
 
+        # Compute color indices
 
         color_combinations = [
             ('G', 'R'), ('R', 'Z'), ('G', 'Z'),
@@ -204,8 +302,11 @@ class PhotoZCatBoostPipeline:
         legacy['BBA'] = bba   # axial ratio 
         legacy['R_CIRC'] = r_circ  #Half light radius
         ## DCHISQ is shaped as PSF, REX, DEV, EXP, SER   (https://www.legacysurvey.org/dr10/files/)
-        legacy['MODEL_WEIGHT'] = legacy['DCHISQ'][:,2]/(legacy['DCHISQ'][:,2]+legacy['DCHISQ'][:,3])    #(p = dchi2dev/(dchi2dev+dchi2exp)) 
-        
+        if 'DCHISQ' in legacy.colnames:
+            d = legacy['DCHISQ']
+            legacy['MODEL_WEIGHT'] = d[:, 2] / (d[:, 2] + d[:, 3])
+        elif 'MODEL_WEIGHT' in (self.feature_names or []):
+            raise ValueError('MODEL_WEIGHT is a feature but DCHISQ is missing')        
         return legacy
     def _add_features_shape_color(self, legacy):
         """Add additional features to the dataset"""
@@ -255,11 +356,10 @@ class PhotoZCatBoostPipeline:
         
         return filtered_legacy
     
-    def filter_data(self, legacy, DR1,feature_names=None,return_all_columns=False,phot_only=False,diagnostics=False,keep_nan_vals = True):
+    def filter_data(self, legacy, DR1=None,feature_names=None,return_all_columns=False,phot_only=False,diagnostics=False,keep_nan_vals = True):
         """Apply quality cuts and filtering to the data"""
         logger.info("Applying data quality cuts...")
         legacy_copy = legacy.copy()
-        DR1_copy = DR1.copy()
         # Flux detection cuts
         if feature_names is None:
             #feature_names = ['MAG_GR', 'MAG_G', 'MAG_RZ', 'MAG_R', 'MAG_RW1', 'MAG_ZW1', 'MAG_W1W2']
@@ -278,7 +378,7 @@ class PhotoZCatBoostPipeline:
 
         mask1 = (legacy['FLUX_G'] != 0) & (legacy['FLUX_R'] != 0) & (legacy['FLUX_Z'] != 0)
         legacy = legacy[feature_names]
-
+        
         # Finite value cuts
         numeric_cols = [c for c in legacy.colnames if np.issubdtype(legacy[c].dtype, np.number)]
         data = np.vstack([legacy[c] for c in numeric_cols]).T
@@ -293,12 +393,20 @@ class PhotoZCatBoostPipeline:
         #     logger.info(f"Objects with non-finite values in features: {np.sum(~mask2)}")
         if phot_only:
             combined_mask = mask1 & mask2
+            if keep_nan_vals:
+                combined_mask = mask1
             logger.info(f"Filtered from {len(legacy)} to {np.sum(combined_mask)} objects based on photometric cuts only")
             if not return_all_columns:
                 return legacy[combined_mask]
             else:
                 return legacy_copy[combined_mask]
         # Valid redshift cuts - FIXED: added upper limit
+        
+        if not phot_only and DR1==None :
+            sys.exit("DR1 data is required")
+
+        DR1_copy = DR1.copy()
+
         if diagnostics:
             logger.info(f"Objects with non-finite or non-positive redshifts: {np.sum(~(np.isfinite(DR1['Z']) & (DR1['Z'] > 0)))}")
         mask3 = np.isfinite(DR1['Z']) & (DR1['Z'] > 0)
@@ -309,15 +417,18 @@ class PhotoZCatBoostPipeline:
         logger.info(f"Filtered from {len(legacy)} to {np.sum(combined_mask)} objects")
         
         DR1_final=DR1[combined_mask]
-        _,indeces=np.unique(DR1_final['TARGETID'],return_index=True)
-        DR1_final=unique(DR1_final,keys='TARGETID')
+        if 'TARGETID' in DR1_final.colnames:
+            _,indeces=np.unique(DR1_final['TARGETID'],return_index=True)
+            DR1_final=unique(DR1_final,keys='TARGETID')
+        else:
+            indeces = np.arange(len(DR1_final))
 
         legacy_final=legacy[combined_mask][indeces]
         logger.info(f"Filtered from {len(legacy)} to {len(legacy_final)} objects for unique TARGETID")
         if not return_all_columns:
             return legacy_final, DR1_final
         else:
-            return legacy_copy[combined_mask], DR1_copy[combined_mask]
+            return legacy_copy[combined_mask][indeces], DR1_copy[combined_mask][indeces]
 
 
     def prepare_ml_data(self, legacy_filtered, DR1_filtered,return_phot_only = False):
@@ -353,29 +464,41 @@ class PhotoZCatBoostPipeline:
         #     logger.info(f'Caution feature: {self.feature_names[nan_feature]} has nan values. Counts: {nan_counts[mask]}')
         return X
 
-    def create_data_splits(self, X, y):
+    def create_data_splits(self, X, y,ids=None):
         """Create train/validation/test splits with consistent random states"""
         logger.info("Creating data splits...")
         
-        # First split: 70% train, 30% temp
-        X_train, X_temp, y_train, y_temp = train_test_split(
-            X, y, test_size=0.20, random_state=self.random_state
-        )
-        
-        # Second split: 15% validation, 15% test
-        X_val, X_test, y_val, y_test = train_test_split(
-            X_temp, y_temp, test_size=0.5, random_state=self.random_state
-        )
+        # First split: 80% train, 20% temp
+        idx = np.arange(len(y))
+        i_train, i_temp = train_test_split(idx, test_size=0.20, random_state=self.random_state)
+        i_val,   i_test = train_test_split(i_temp, test_size=0.5, random_state=self.random_state)
+
         
         # Store splits in the class
-        self.X_train, self.X_val, self.X_test = X_train, X_val, X_test
-        self.y_train, self.y_val, self.y_test = y_train, y_val, y_test
+        self.X_train, self.X_val, self.X_test = X[i_train], X[i_val], X[i_test]
+        self.y_train, self.y_val, self.y_test = y[i_train], y[i_val], y[i_test]
+        self.i_train, self.i_val, self.i_test = i_train, i_val, i_test
+        self.ids = ids
+        if ids is not None:
+            np.savez(self.run_dir / 'predictions' / f'split_ids_{self.region_tag}.npz',
+                 train=ids[i_train], val=ids[i_val], test=ids[i_test])
         
-        logger.info(f"Train: {X_train.shape[0]}, Val: {X_val.shape[0]}, Test: {X_test.shape[0]}")
-        
-        return X_train, X_val, X_test, y_train, y_val, y_test
-
-    def train_new_model(self, iterations=5000, depth=6, learning_rate=0.01,weight=None,train_dir=None):
+        logger.info(f"Train: {len(i_train)}, Val: {len(i_val)}, Test: {len(i_test)}")
+        return self.X_train, self.X_val, self.X_test, self.y_train, self.y_val, self.y_test
+    def predict_z(self, X,virtual_ensembles=None):
+        """Returns (z_phot, sigma_z) for RMSEWithUncertainty, or (z_phot, None) otherwise."""
+        if virtual_ensembles is None:
+            p = self.model.predict(X)
+            if p.ndim == 2 and p.shape[1] == 2:
+                return p[:, 0], np.sqrt(p[:, 1])
+            return p, None
+    
+        ve = self.model.virtual_ensembles_predict(
+            X, prediction_type='TotalUncertainty',
+            virtual_ensembles_count=virtual_ensembles)
+        mu, var_kno, var_dat = ve[:, 0], ve[:, 1], ve[:, 2]
+        return mu, np.sqrt(var_kno + var_dat), np.sqrt(var_kno), np.sqrt(var_dat)
+    def train_new_model(self, iterations=5000, depth=6, learning_rate=0.01,weight=None,train_dir=None,min_data_in_leaf=50,  od_wait=None):
         """Train a fresh model from scratch"""
         logger.info("Training new CatBoost model......")
         if weight == 'z_weight_FP':
@@ -389,12 +512,14 @@ class PhotoZCatBoostPipeline:
             iterations=iterations,
             depth=depth,
             learning_rate=learning_rate,
-            loss_function='RMSE',
+            loss_function='RMSEWithUncertainty',
+            posterior_sampling=True,
             eval_metric=SigmaNMAD(),
             custom_metric=['MAE','R2'],
             task_type="GPU" if self.use_gpu else "CPU",
             random_seed=self.random_state,
-            verbose=200, train_dir= train_dir
+            verbose=200, train_dir= train_dir,
+            min_data_in_leaf=min_data_in_leaf,od_wait = od_wait
             #weights = weights if weight != None else None
         )
         
@@ -476,8 +601,8 @@ class PhotoZCatBoostPipeline:
             iterations=iterations,
             depth=depth,
             learning_rate=learning_rate,
-            loss_function='RMSE',
-            eval_metric='RMSE',
+            loss_function='RMSEWithUncertainty',
+            eval_metric='RMSEWithUncertainty',
             task_type="GPU" if self.use_gpu else "CPU",
             random_seed=self.random_state,
             verbose=100
@@ -507,23 +632,40 @@ class PhotoZCatBoostPipeline:
         results = {}
         
         # Test set evaluation
-        y_pred_test = self.model.predict(self.X_test)
-        
+        #y_pred_test = self.model.predict(self.X_test)
+        ve_count = getattr(self, 'virtual_ensembles_count', None)
+
+        if ve_count:
+            y_pred_test, sig_tot_t, sig_kno_t, sig_dat_t = self.predict_z(self.X_test, ve_count)
+            y_pred_val,  sig_tot_v, sig_kno_v, sig_dat_v = self.predict_z(self.X_val,  ve_count)
+            extra = dict(sigma_test=sig_tot_t, sigma_val=sig_tot_v,
+                        sigma_kno_test=sig_kno_t, sigma_dat_test=sig_dat_t,
+                        sigma_kno_val=sig_kno_v,  sigma_dat_val=sig_dat_v)
+            logger.info(f"median sigma_kno={np.median(sig_kno_t):.5f}  "
+                        f"sigma_dat={np.median(sig_dat_t):.5f}  "
+                        f"ratio={np.median(sig_kno_t/sig_dat_t):.3f}")
+        else:
+            y_pred_test, sig_tot_t = self.predict_z(self.X_test)
+            y_pred_val, sig_tot_v = self.predict_z(self.X_val)
+
+        extra = {} if sig_tot_t is None else dict(sigma_test=sig_tot_t, sigma_val=sig_tot_v)
         results['test'] = {
-            'mae': mean_absolute_error(self.y_test, y_pred_test),
-            'mse': mean_squared_error(self.y_test, y_pred_test),
-            'rmse': np.sqrt(mean_squared_error(self.y_test, y_pred_test)),
-            'r2': r2_score(self.y_test, y_pred_test)
-        }
-        
+                'mae': mean_absolute_error(self.y_test, y_pred_test),
+                'mse': mean_squared_error(self.y_test, y_pred_test),
+                'rmse': np.sqrt(mean_squared_error(self.y_test, y_pred_test)),
+                'r2': r2_score(self.y_test, y_pred_test),
+                **extra
+            }
+            
         # Validation set evaluation
-        y_pred_val = self.model.predict(self.X_val)
+        #y_pred_val = self.model.predict(self.X_val)
+        y_pred_val,sigma_val = self.predict_z(self.X_val)
         
         results['validation'] = {
             'mae': mean_absolute_error(self.y_val, y_pred_val),
             'mse': mean_squared_error(self.y_val, y_pred_val),
             'rmse': np.sqrt(mean_squared_error(self.y_val, y_pred_val)),
-            'r2': r2_score(self.y_val, y_pred_val)
+            'r2': r2_score(self.y_val, y_pred_val),
         }
         
         # Custom PhotoZ metrics
@@ -542,9 +684,11 @@ class PhotoZCatBoostPipeline:
         if save_predictions:
             # Save predictions for further analysis
             out_path = self.run_dir / 'predictions' / f'predictions_{self.region_tag}.npz'
+            extra = {} if sigma_test is None else dict(sigma_test=sigma_test, sigma_val=sigma_val)
             np.savez(out_path,
                     y_test=self.y_test, y_pred_test=y_pred_test,
-                    y_val=self.y_val, y_pred_val=y_pred_val)
+                    y_val=self.y_val, y_pred_val=y_pred_val,
+                    ids_test=self.ids[self.i_test], ids_val=self.ids[self.i_val], **extra)
             logger.info(f"Predictions saved to {out_path}")
         
         return results
@@ -656,7 +800,8 @@ class PhotoZCatBoostPipeline:
     def plot_2d_hist_test(self, bins=50):
         """Plot 2D histogram"""
         x = self.y_test
-        y = self.model.predict(self.X_test)
+        #y = self.model.predict(self.X_test)
+        y, _ = self.predict_z(self.X_test)
         save_path = self.run_dir / 'plots' / f'2d_hist_test_{self.region_tag}.png'
 
         hist, xedges, yedges = self.two_d_hist(x, y, bins=bins)
@@ -711,7 +856,8 @@ class PhotoZCatBoostPipeline:
 
         # SHAP values
         shap_values = model.get_feature_importance(type='ShapValues', data=sample_pool) #SHapley Additive exPlanations 
-        shap_values = shap_values[:, :-1]
+        #shap_values = shap_values[:, :-1]
+        shap_values = shap_values[:,0, :-1]  # Exclude the last column (expected value)
         shap_importance = np.mean(np.abs(shap_values), axis=0)
 
         # Loss importance
@@ -752,6 +898,8 @@ def main():
     parser.add_argument("--weight",   type=str,  default=None)
     parser.add_argument("--model_path", type=str, default=None)
     parser.add_argument("--plot",     type=str,  default=None)
+    parser.add_argument("--ctrans", choices=["on", "off"], default=None,
+                        help="Override photometry.colour_transform.enable")
     args = parser.parse_args()
 
     cfg =     PhotoZCatBoostPipeline.load_config(args.config)
@@ -762,6 +910,8 @@ def main():
     if args.weight:     cfg['model']['weight']         = args.weight
     if args.model_path: cfg['pipeline']['model_path']  = args.model_path
     if args.plot:       cfg['pipeline']['plot']        = args.plot
+    if args.ctrans:
+        cfg.setdefault('photometry', {}).setdefault('colour_transform', {})['enable'] = (args.ctrans == 'on')
     # Initialize pipeline
     run_dir = setup_run_dir(args.run_dir)
     add_file_logger(run_dir)
@@ -776,10 +926,15 @@ def main():
 
     # Load and prepare data (always needed)
     DR1, legacy = pipeline.load_astronomical_data(cfg)
-    legacy = pipeline.compute_magnitudes(legacy)
+    legacy = pipeline.compute_magnitudes(legacy, cfg)
     legacy_filtered, DR1_filtered = pipeline.filter_data(legacy, DR1,feature_names = cfg.get('features'))
+    if 'TARGETID'  in DR1_filtered.colnames:
+        ids=np.asarray(DR1_filtered['TARGETID'])
+    else: 
+        ids = np.arange(len(DR1_filtered))
+    
     X,y = pipeline.prepare_ml_data(legacy_filtered, DR1_filtered)
-    pipeline.create_data_splits(X, y)
+    pipeline.create_data_splits(X, y, ids=ids)
     
     mode       = cfg['pipeline']['mode']
     model_path = cfg['pipeline'].get('model_path')
@@ -793,7 +948,7 @@ def main():
             iterations=mcfg['iterations'],
             depth=mcfg['depth'],
             learning_rate=mcfg['learning_rate'],
-            weight=mcfg.get('weight'),train_dir = mcfg.get('train_dir')
+            weight=mcfg.get('weight'),train_dir = mcfg.get('train_dir'),min_data_in_leaf=mcfg.get('min_data_in_leaf',1),od_wait=mcfg.get('od_wait',None)
         )
         pipeline.evaluate_model(save_predictions=cfg['pipeline']['save_predictions'])
         out_name = model_path or f"catboost_{region}_{mcfg.get('weight') or 'noweight'}.cbm"
